@@ -1,7 +1,6 @@
 use hotaru::prelude::*;
 use hotaru::http::*;
 
-mod models;
 mod resource;
 
 pub static APP: SApp = Lazy::new(|| {
@@ -30,6 +29,23 @@ endpoint! {
     <p>Data is stored in <code>./data</code> directory.</p>
 </body>
 </html>"#;
+        text_response(html)
+    }
+}
+
+endpoint! {
+    APP.url("/latest"),
+    pub latest<HTTP> {
+        let html = "<title>latest data</title><p> waiting for data </p>";
+        text_response(html)
+    }
+}
+
+
+endpoint! {
+    APP.url("/stats"),
+    pub stats<HTTP> {
+        let html = "<title>overall stats</title><p> waiting for data </p>";
         text_response(html)
     }
 }
