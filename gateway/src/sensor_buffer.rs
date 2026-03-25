@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Condvar};
 use std::collections::VecDeque;
 
 use sensor_sim::accelerometer::AccelReading;
@@ -13,31 +13,41 @@ pub enum SensorReading {
 }
 
 pub struct SharedBuffer {
-    queue: VecDeque<SensorReading>,
+    queue: Mutex<VecDeque<SensorReading>>,
+    cond: Condvar,
     capacity: usize,
 }
 
 impl SharedBuffer {
     pub fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            queue: VecDeque::with_capacity(capacity),
+            queue: Mutex::new(VecDeque::with_capacity(capacity)),
+            cond: Condvar::new(),
             capacity,
         })
     }
 
     pub fn push(&self, reading: SensorReading) {
-        let mut queue = self.queue.clone();
+        let mut queue = self.queue.lock().unwrap();
+        while queue.len() >= self.capacity {
+            queue = self.cond.wait(queue).unwrap();
+        }
         queue.push_back(reading);
+        self.cond.notify_one(); 
     }
 
-    pub fn pop(&self) -> Option<SensorReading> {
-        let mut queue = self.queue.clone();
-        let val = queue.pop_front();
+    pub fn pop(&self) -> SensorReading {
+        let mut queue = self.queue.lock().unwrap();
+        while queue.is_empty() {
+            queue = self.cond.wait(queue).unwrap();
+        }
+        let val = queue.pop_front().unwrap();
+        self.cond.notify_one(); 
         val
     }
 
     pub fn len(&self) -> usize {
-        self.queue.len()
+        self.queue.lock().unwrap().len()
     }
 
     pub fn capacity(&self) -> usize {
