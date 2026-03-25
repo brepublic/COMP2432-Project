@@ -854,6 +854,8 @@ dependencies = [
  "dashboard",
  "sensor_sim",
  "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

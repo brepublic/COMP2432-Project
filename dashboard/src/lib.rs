@@ -57,8 +57,8 @@ async fn force_1() -> Text<&'static str> {
     Text::Html("<h1>force_1</h1><p>to be implemented </p>")
 }
 
-#[tokio::main]
-pub async fn main(){
+
+pub async fn run(addr: &'static str){
     let sensor = Router::with_path("sensor")
                 .push(Router::with_path("thermo_1").get(thermo_1))
                 .push(Router::with_path("thermo_2").get(thermo_2))
@@ -70,6 +70,7 @@ pub async fn main(){
                 .push(Router::with_path("stats").get(stats))
                 .push(Router::with_path("latest").get(latest))
                 .push(sensor);
-    let listener=TcpListener::new("127.0.0.1:5800").bind().await;
+    let listener=TcpListener::new(addr).bind().await;
     Server::new(listener).serve(router).await;
 }
+mod resource;
