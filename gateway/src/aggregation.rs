@@ -1,8 +1,11 @@
+// gateway/src/aggregation.rs
+
 use std::time::Duration;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
-use chrono::Utc;
+use chrono::Utc; // Add chrono dependency
 
 use crate::sensor_buffer::{SharedBuffer, SensorReading};
 use crate::storage::DataStorage;
@@ -29,7 +32,7 @@ pub struct Anomaly {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AggregatedFrame {
     pub frame_id: u64,
-    pub window_start: u64,
+    pub window_start: u64, // Unix millisecond timestamp
     pub window_end: u64,
     pub sensor_stats: HashMap<String, SensorStats>,
     pub anomalies: Vec<Anomaly>,
@@ -42,7 +45,7 @@ pub struct AggregationEngine {
     num_workers: usize,
     anomaly_threshold: f32,
     worker_handles: Vec<thread::JoinHandle<()>>,
-    shutdown: Arc<Mutex<bool>>,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl AggregationEngine {
@@ -60,7 +63,7 @@ impl AggregationEngine {
             num_workers,
             anomaly_threshold,
             worker_handles: Vec::new(),
-            shutdown: Arc::new(Mutex::new(false)),
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -76,14 +79,17 @@ impl AggregationEngine {
                 let mut frame_id = id as u64;
                 let mut sensor_data: HashMap<String, Vec<SensorReading>> = HashMap::new();
 
+                // Use std::time::Instant to measure elapsed time; use chrono::Utc for timestamps
                 let mut window_start_instant = std::time::Instant::now();
                 let mut window_start_millis = Utc::now().timestamp_millis() as u64;
 
                 loop {
-                    if *shutdown.lock().unwrap() {
+                    // Check shutdown signal
+                    if shutdown.load(Ordering::SeqCst) {
                         break;
                     }
 
+                    // Try to pop from the buffer (timeout 10ms)
                     if let Some(reading) = buffer.pop_timeout(Duration::from_millis(10)) {
                         let sensor_id = match &reading {
                             SensorReading::Accel(_, id) => id.clone(),
@@ -93,6 +99,7 @@ impl AggregationEngine {
                         sensor_data.entry(sensor_id).or_insert_with(Vec::new).push(reading);
                     }
 
+                    // Check whether the current window has ended
                     if window_start_instant.elapsed() >= window_duration {
                         let window_end_millis = Utc::now().timestamp_millis() as u64;
                         let mut stats_map = HashMap::new();
@@ -114,6 +121,7 @@ impl AggregationEngine {
 
                         storage.write(frame);
 
+                        // Prepare the next window
                         window_start_instant = std::time::Instant::now();
                         window_start_millis = window_end_millis;
                         sensor_data.clear();
@@ -127,7 +135,7 @@ impl AggregationEngine {
     }
 
     pub fn shutdown(&mut self) {
-        *self.shutdown.lock().unwrap() = true;
+        self.shutdown.store(true, Ordering::SeqCst);
         while let Some(handle) = self.worker_handles.pop() {
             handle.join().unwrap();
         }

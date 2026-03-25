@@ -141,7 +141,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// Generate a helper module for finding resources at runtime
-fn generate_resource_locator(manifest_dir: &Path, profile_dir: &Path, is_in_workspace: bool) {
+fn generate_resource_locator(manifest_dir: &Path, _profile_dir: &Path, is_in_workspace: bool) {
     // Create src directory if it doesn't exist
     let src_dir = manifest_dir.join("src");
     if !src_dir.exists() {

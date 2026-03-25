@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Latest Aggregated Frames</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+        .header { display: flex; justify-content: space-between; align-items: baseline; }
+        .meta { color: #475569; }
+        .card { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+        .muted { color: #64748b; }
+        table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+        th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fee2e2; color: #991b1b; font-size: 12px; }
+        a { color: #0969da; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Latest Aggregated Frames</h1>
+        <a href="/">Back to home</a>
+    </div>
+    <div class="meta">Auto refresh: every 1 second</div>
+    <div id="container"></div>
+    <script>
+        function renderFrame(frame) {
+            const sensors = Object.keys(frame.sensor_stats || {});
+            const rows = sensors.map((id) => {
+                const s = frame.sensor_stats[id];
+                return `<tr>
+                    <td>${id}</td>
+                    <td>${s.count}</td>
+                    <td>${s.avg.toFixed(3)}</td>
+                    <td>${s.min.toFixed(3)}</td>
+                    <td>${s.max.toFixed(3)}</td>
+                    <td>${s.stddev.toFixed(3)}</td>
+                </tr>`;
+            }).join("");
+            return `
+                <div class="card">
+                    <div><strong>Frame #${frame.frame_id}</strong> <span class="muted">window_end=${frame.window_end}</span></div>
+                    <div style="margin-top:6px;">Anomalies: <span class="badge">${(frame.anomalies || []).length}</span></div>
+                    <table>
+                        <thead><tr><th>Sensor</th><th>Count</th><th>Avg</th><th>Min</th><th>Max</th><th>Stddev</th></tr></thead>
+                        <tbody>${rows || `<tr><td colspan="6" class="muted">No sensor stats</td></tr>`}</tbody>
+                    </table>
+                </div>
+            `;
+        }
+
+        async function refresh() {
+            const container = document.getElementById("container");
+            try {
+                const response = await fetch("/api/latest", { cache: "no-store" });
+                if (!response.ok) throw new Error("HTTP " + response.status);
+                const frames = await response.json();
+                if (!Array.isArray(frames) || frames.length === 0) {
+                    container.innerHTML = '<div class="card muted">No aggregated frames yet.</div>';
+                    return;
+                }
+                container.innerHTML = frames.map(renderFrame).join("");
+            } catch (error) {
+                container.innerHTML = `<div class="card">Failed to fetch data: ${error}</div>`;
+            }
+        }
+
+        refresh();
+        setInterval(refresh, 1000);
+    </script>
+</body>
+</html>
+

@@ -21,7 +21,7 @@ const MAX_QUEUE_SIZE: usize = 128;
 pub struct ForceSensor {
     id: String,
     rate_per_sec: u32,
-    queue: Box<RWRoundQueue<ForceReading>>,
+    _queue: Box<RWRoundQueue<ForceReading>>,
     reader: QueueReader<ForceReading>,
     writer: Option<QueueWriter<ForceReading>>,
     running: Arc<AtomicBool>,
@@ -79,7 +79,7 @@ impl Sensor for ForceSensor {
         ForceSensor {
             id,
             rate_per_sec,
-            queue,
+            _queue: queue,
             reader,
             writer: Some(writer),
             running: Arc::new(AtomicBool::new(true)),

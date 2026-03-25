@@ -1,4 +1,5 @@
 use salvo::prelude::*;
+mod models;
 
 #[handler]
 async fn root() -> Text<&'static str> {
@@ -73,4 +74,3 @@ pub async fn run(addr: &'static str){
     let listener=TcpListener::new(addr).bind().await;
     Server::new(listener).serve(router).await;
 }
-mod resource;

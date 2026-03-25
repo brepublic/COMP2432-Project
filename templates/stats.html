@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>System Statistics</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+        .header { display: flex; justify-content: space-between; align-items: baseline; }
+        .meta { color: #475569; }
+        .grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+        .card { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px; }
+        .label { color: #64748b; font-size: 12px; }
+        .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+        .sensor-list { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .chip { background: #e2e8f0; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+        a { color: #0969da; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>System Statistics</h1>
+        <a href="/">Back to home</a>
+    </div>
+    <div class="meta">Auto refresh: every 1 second</div>
+
+    <div class="grid">
+        <div class="card"><div class="label">Total Frames</div><div class="value" id="total-frames">-</div></div>
+        <div class="card"><div class="label">Total Anomalies</div><div class="value" id="total-anomalies">-</div></div>
+        <div class="card"><div class="label">Latest Frame ID</div><div class="value" id="latest-frame-id">-</div></div>
+        <div class="card"><div class="label">Latest Window End</div><div class="value" id="latest-window-end">-</div></div>
+    </div>
+
+    <h3 style="margin-top:16px;">Sensors Seen</h3>
+    <div id="sensor-list" class="sensor-list"></div>
+
+    <script>
+        async function refresh() {
+            try {
+                const response = await fetch("/api/stats", { cache: "no-store" });
+                if (!response.ok) throw new Error("HTTP " + response.status);
+                const data = await response.json();
+                document.getElementById("total-frames").textContent = data.total_frames ?? "-";
+                document.getElementById("total-anomalies").textContent = data.total_anomalies ?? "-";
+                document.getElementById("latest-frame-id").textContent = data.latest_frame_id ?? "-";
+                document.getElementById("latest-window-end").textContent = data.latest_window_end ?? "-";
+
+                const list = document.getElementById("sensor-list");
+                const sensors = Array.isArray(data.sensors_seen) ? data.sensors_seen : [];
+                list.innerHTML = sensors.length
+                    ? sensors.map(s => `<span class="chip">${s}</span>`).join("")
+                    : `<span class="chip">No sensors yet</span>`;
+            } catch (error) {
+                document.getElementById("sensor-list").innerHTML = `<span class="chip">Failed to fetch data: ${error}</span>`;
+            }
+        }
+        refresh();
+        setInterval(refresh, 1000);
+    </script>
+</body>
+</html>
+

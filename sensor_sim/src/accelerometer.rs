@@ -21,7 +21,7 @@ const MAX_QUEUE_SIZE: usize = 128;
 pub struct Accelerometer {
     id: String,
     rate_per_sec: u32,
-    queue: Box<RWRoundQueue<AccelReading>>,
+    _queue: Box<RWRoundQueue<AccelReading>>,
     reader: QueueReader<AccelReading>,
     writer: Option<QueueWriter<AccelReading>>,
     running: Arc<AtomicBool>,
@@ -79,7 +79,7 @@ impl Sensor for Accelerometer {
         Accelerometer {
             id,
             rate_per_sec,
-            queue,
+            _queue: queue,
             reader,
             writer: Some(writer),
             running: Arc::new(AtomicBool::new(true)),

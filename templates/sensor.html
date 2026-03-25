@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Sensor Live View</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+        .header { display: flex; justify-content: space-between; align-items: baseline; }
+        .meta { color: #475569; }
+        .card { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+        .grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
+        .label { color: #64748b; font-size: 12px; }
+        .value { font-size: 20px; font-weight: 700; margin-top: 6px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
+        .ok { color: #166534; }
+        .warn { color: #991b1b; }
+        a { color: #0969da; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 id="sensor-title">Sensor Live View</h1>
+        <a href="/sensor">Back to sensors</a>
+    </div>
+    <div class="meta">Auto refresh: every 1 second</div>
+
+    <div class="grid">
+        <div class="card" style="margin-bottom:0;">
+            <div class="label">Latest Frame ID</div><div class="value" id="frame-id">-</div>
+        </div>
+        <div class="card" style="margin-bottom:0;">
+            <div class="label">Latest Window End</div><div class="value" id="window-end">-</div>
+        </div>
+        <div class="card" style="margin-bottom:0;">
+            <div class="label">Sample Count</div><div class="value" id="count">-</div>
+        </div>
+        <div class="card" style="margin-bottom:0;">
+            <div class="label">Anomaly Count</div><div class="value" id="anomaly-count">-</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h3>Statistics</h3>
+        <table>
+            <thead><tr><th>Avg</th><th>Min</th><th>Max</th><th>Stddev</th></tr></thead>
+            <tbody><tr><td id="avg">-</td><td id="min">-</td><td id="max">-</td><td id="stddev">-</td></tr></tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h3>Anomalies</h3>
+        <table>
+            <thead><tr><th>Type</th><th>Severity</th><th>Description</th></tr></thead>
+            <tbody id="anomaly-rows"><tr><td colspan="3" class="ok">No anomalies</td></tr></tbody>
+        </table>
+    </div>
+
+    <script>
+        const sensorId = decodeURIComponent(location.pathname.split("/").pop() || "");
+        document.getElementById("sensor-title").textContent = `Sensor Live View: ${sensorId}`;
+
+        async function refresh() {
+            try {
+                const response = await fetch(`/api/sensor/${encodeURIComponent(sensorId)}`, { cache: "no-store" });
+                if (!response.ok) throw new Error("HTTP " + response.status);
+                const data = await response.json();
+
+                document.getElementById("frame-id").textContent = data.latest_frame_id ?? "-";
+                document.getElementById("window-end").textContent = data.latest_window_end ?? "-";
+                document.getElementById("anomaly-count").textContent = (data.anomalies || []).length;
+
+                if (data.stats) {
+                    document.getElementById("count").textContent = data.stats.count;
+                    document.getElementById("avg").textContent = data.stats.avg.toFixed(3);
+                    document.getElementById("min").textContent = data.stats.min.toFixed(3);
+                    document.getElementById("max").textContent = data.stats.max.toFixed(3);
+                    document.getElementById("stddev").textContent = data.stats.stddev.toFixed(3);
+                } else {
+                    document.getElementById("count").textContent = "-";
+                    document.getElementById("avg").textContent = "-";
+                    document.getElementById("min").textContent = "-";
+                    document.getElementById("max").textContent = "-";
+                    document.getElementById("stddev").textContent = "-";
+                }
+
+                const rows = (data.anomalies || []).map(a => `
+                    <tr class="warn">
+                        <td>${a.anomaly_type}</td>
+                        <td>${Number(a.severity).toFixed(3)}</td>
+                        <td>${a.description}</td>
+                    </tr>
+                `).join("");
+
+                document.getElementById("anomaly-rows").innerHTML =
+                    rows || '<tr><td colspan="3" class="ok">No anomalies</td></tr>';
+            } catch (error) {
+                document.getElementById("anomaly-rows").innerHTML =
+                    `<tr><td colspan="3" class="warn">Failed to fetch data: ${error}</td></tr>`;
+            }
+        }
+
+        refresh();
+        setInterval(refresh, 1000);
+    </script>
+</body>
+</html>
+

@@ -19,7 +19,7 @@ const MAX_QUEUE_SIZE: usize = 128;
 pub struct Thermometer {
     id: String,
     rate_per_sec: u32,
-    queue: Box<RWRoundQueue<ThermoReading>>,
+    _queue: Box<RWRoundQueue<ThermoReading>>,
     reader: QueueReader<ThermoReading>,
     writer: Option<QueueWriter<ThermoReading>>,
     running: Arc<AtomicBool>,
@@ -82,7 +82,7 @@ impl Sensor for Thermometer {
         Thermometer {
             id,
             rate_per_sec,
-            queue,
+            _queue: queue,
             reader,
             writer: Some(writer),
             running: Arc::new(AtomicBool::new(true)),

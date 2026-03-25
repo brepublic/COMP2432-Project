@@ -1,3 +1,5 @@
+// gateway/src/sensor_buffer.rs
+
 use std::sync::{Arc, Mutex, Condvar};
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -6,6 +8,7 @@ use sensor_sim::accelerometer::AccelReading;
 use sensor_sim::force_sensor::ForceReading;
 use sensor_sim::thermometer::ThermoReading;
 
+/// Unified sensor reading enum, including the sensor ID.
 #[derive(Debug, Clone)]
 pub enum SensorReading {
     Accel(AccelReading, String),
@@ -13,6 +16,7 @@ pub enum SensorReading {
     Thermo(ThermoReading, String),
 }
 
+/// Thread-safe shared buffer (bounded blocking queue).
 pub struct SharedBuffer {
     queue: Mutex<VecDeque<SensorReading>>,
     cond: Condvar,
@@ -28,25 +32,29 @@ impl SharedBuffer {
         })
     }
 
+    /// Push a reading into the buffer. If the buffer is full, block until space is available.
     pub fn push(&self, reading: SensorReading) {
         let mut queue = self.queue.lock().unwrap();
         while queue.len() >= self.capacity {
             queue = self.cond.wait(queue).unwrap();
         }
         queue.push_back(reading);
-        self.cond.notify_one(); 
+        self.cond.notify_one(); // Wake a potential consumer
     }
 
+    /// Pop a reading from the buffer. If the buffer is empty, block until data arrives.
+    #[allow(dead_code)]
     pub fn pop(&self) -> SensorReading {
         let mut queue = self.queue.lock().unwrap();
         while queue.is_empty() {
             queue = self.cond.wait(queue).unwrap();
         }
         let val = queue.pop_front().unwrap();
-        self.cond.notify_one(); 
+        self.cond.notify_one(); // Wake a potential producer
         val
     }
 
+    /// Pop with timeout. Returns `None` on timeout.
     pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
         let mut queue = self.queue.lock().unwrap();
         let result = self.cond
@@ -60,10 +68,12 @@ impl SharedBuffer {
         }
     }
 
+    /// Current queue length.
     pub fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
 
+    /// Buffer capacity.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
