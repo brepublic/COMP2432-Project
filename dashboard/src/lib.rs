@@ -26,3 +26,4 @@ pub async fn main(){
     let listener=TcpListener::new("127.0.0.1:5800").bind().await;
     Server::new(listener).serve(router).await;
 }
+mod resource;
