@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 hotaru = "0.7.7" 
+salvo = "0.89.3"

@@ -20,10 +20,56 @@ async fn root() -> Text<&'static str> {
 </html>"#)
 }
 
+
+#[handler]
+async fn latest() -> Text<&'static str> {
+    Text::Html("<h1>latest</h1><p>to be implemented </p>")
+}
+
+#[handler]
+async fn stats() -> Text<&'static str> {
+    Text::Html("<h1>stats</h1><p>to be implemented </p>")
+}
+
+#[handler]
+async fn thermo_1() -> Text<&'static str> {
+    Text::Html("<h1>thermo_1</h1><p>to be implemented </p>")
+}
+
+#[handler]
+async fn thermo_2() -> Text<&'static str> {
+    Text::Html("<h1>thermo_2</h1><p>to be implemented </p>")
+}
+
+#[handler]
+async fn accel_1() -> Text<&'static str> {
+    Text::Html("<h1>accel_1</h1><p>to be implemented </p>")
+}
+
+#[handler]
+async fn accel_2() -> Text<&'static str> {
+    Text::Html("<h1>accel_2</h1><p>to be implemented </p>")
+}
+
+
+#[handler]
+async fn force_1() -> Text<&'static str> {
+    Text::Html("<h1>force_1</h1><p>to be implemented </p>")
+}
+
 #[tokio::main]
 pub async fn main(){
-    let router = Router::new().get(root);
+    let sensor = Router::with_path("sensor")
+                .push(Router::with_path("thermo_1").get(thermo_1))
+                .push(Router::with_path("thermo_2").get(thermo_2))
+                .push(Router::with_path("accel_1").get(accel_1))
+                .push(Router::with_path("accel_2").get(accel_2))
+                .push(Router::with_path("force_1").get(force_1));
+    let router = Router::new()
+                .get(root)
+                .push(Router::with_path("stats").get(stats))
+                .push(Router::with_path("latest").get(latest))
+                .push(sensor);
     let listener=TcpListener::new("127.0.0.1:5800").bind().await;
     Server::new(listener).serve(router).await;
 }
-mod resource;
