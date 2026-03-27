@@ -24,6 +24,13 @@ use storage::DataStorage;
 
 // Import the dashboard (Web server)
 
+// Sensor generation rates (events per second).
+const THERMO_1_RATE_PER_SEC: u32 = 50;
+const THERMO_2_RATE_PER_SEC: u32 = 50;
+const ACCEL_1_RATE_PER_SEC: u32 = 100;
+const ACCEL_2_RATE_PER_SEC: u32 = 100;
+const FORCE_1_RATE_PER_SEC: u32 = 75;
+
 fn main() {
     // Create an atomic boolean as a global stop flag
     let running = Arc::new(AtomicBool::new(true));
@@ -47,11 +54,11 @@ fn main() {
     let buffer = SharedBuffer::new_with_policy(5000, fail_on_full);
 
     // 2. Create and start sensors
-    let mut thermo_1 = Thermometer::new("thermo-1".to_string(), 10);
-    let mut thermo_2 = Thermometer::new("thermo-2".to_string(), 10);
-    let mut accel_1 = Accelerometer::new("accel-1".to_string(), 20);
-    let mut accel_2 = Accelerometer::new("accel-2".to_string(), 20);
-    let mut force_1 = ForceSensor::new("force-1".to_string(), 15);
+    let mut thermo_1 = Thermometer::new("thermo-1".to_string(), THERMO_1_RATE_PER_SEC);
+    let mut thermo_2 = Thermometer::new("thermo-2".to_string(), THERMO_2_RATE_PER_SEC);
+    let mut accel_1 = Accelerometer::new("accel-1".to_string(), ACCEL_1_RATE_PER_SEC);
+    let mut accel_2 = Accelerometer::new("accel-2".to_string(), ACCEL_2_RATE_PER_SEC);
+    let mut force_1 = ForceSensor::new("force-1".to_string(), FORCE_1_RATE_PER_SEC);
 
     thermo_1.start();
     thermo_2.start();
