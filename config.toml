@@ -1,0 +1,11 @@
+[sensors]
+thermo_1_rate_per_sec = 1000
+thermo_2_rate_per_sec = 1000
+accel_1_rate_per_sec = 1000
+accel_2_rate_per_sec = 1000
+force_1_rate_per_sec = 1000
+
+[buffer]
+# SharedBuffer capacity (number of readings).
+capacity = 5000
+

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
+use serde::Deserialize;
 
 use sensor_sim::{
     accelerometer::Accelerometer,
@@ -25,17 +26,75 @@ use storage::DataStorage;
 // Import the dashboard (Web server)
 
 // Sensor generation rates (events per second).
-const THERMO_1_RATE_PER_SEC: u32 = 50;
-const THERMO_2_RATE_PER_SEC: u32 = 50;
-const ACCEL_1_RATE_PER_SEC: u32 = 100;
-const ACCEL_2_RATE_PER_SEC: u32 = 100;
-const FORCE_1_RATE_PER_SEC: u32 = 75;
 const BUFFER_DEBUG_ENV: &str = "GATEWAY_DEBUG_BUFFER";
+const GATEWAY_CONFIG_ENV: &str = "GATEWAY_CONFIG";
+
+#[derive(Debug, Deserialize)]
+struct GatewayConfig {
+    sensors: SensorsConfig,
+    buffer: BufferConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct SensorsConfig {
+    thermo_1_rate_per_sec: u32,
+    thermo_2_rate_per_sec: u32,
+    accel_1_rate_per_sec: u32,
+    accel_2_rate_per_sec: u32,
+    force_1_rate_per_sec: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BufferConfig {
+    capacity: usize,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            sensors: SensorsConfig {
+                thermo_1_rate_per_sec: 50,
+                thermo_2_rate_per_sec: 50,
+                accel_1_rate_per_sec: 100,
+                accel_2_rate_per_sec: 100,
+                force_1_rate_per_sec: 75,
+            },
+            buffer: BufferConfig { capacity: 5000 },
+        }
+    }
+}
+
+fn load_gateway_config() -> GatewayConfig {
+    let config_path = std::env::var(GATEWAY_CONFIG_ENV).unwrap_or_else(|_| "./config.toml".to_string());
+    let cfg_text = match std::fs::read_to_string(&config_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to read config file {}: {}. Using defaults.",
+                config_path, e
+            );
+            return GatewayConfig::default();
+        }
+    };
+
+    match toml::from_str::<GatewayConfig>(&cfg_text) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!(
+                "Warning: failed to parse config file {}: {}. Using defaults.",
+                config_path, e
+            );
+            GatewayConfig::default()
+        }
+    }
+}
 
 fn main() {
     // Create an atomic boolean as a global stop flag
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
+
+    let cfg = load_gateway_config();
 
     // Set Ctrl+C handler for graceful shutdown
     ctrlc::set_handler(move || {
@@ -52,18 +111,23 @@ fn main() {
     if fail_on_full {
         println!("Debug mode enabled: process will panic if SharedBuffer gets full.");
     }
-    let buffer = SharedBuffer::new_with_policy(5000, fail_on_full);
+    let buffer = SharedBuffer::new_with_policy(cfg.buffer.capacity, fail_on_full);
     let buffer_debug = std::env::var(BUFFER_DEBUG_ENV)
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(false);
     let (mut last_pushed, mut last_popped) = buffer.totals();
 
     // 2. Create and start sensors
-    let mut thermo_1 = Thermometer::new("thermo-1".to_string(), THERMO_1_RATE_PER_SEC);
-    let mut thermo_2 = Thermometer::new("thermo-2".to_string(), THERMO_2_RATE_PER_SEC);
-    let mut accel_1 = Accelerometer::new("accel-1".to_string(), ACCEL_1_RATE_PER_SEC);
-    let mut accel_2 = Accelerometer::new("accel-2".to_string(), ACCEL_2_RATE_PER_SEC);
-    let mut force_1 = ForceSensor::new("force-1".to_string(), FORCE_1_RATE_PER_SEC);
+    let mut thermo_1 =
+        Thermometer::new("thermo-1".to_string(), cfg.sensors.thermo_1_rate_per_sec);
+    let mut thermo_2 =
+        Thermometer::new("thermo-2".to_string(), cfg.sensors.thermo_2_rate_per_sec);
+    let mut accel_1 =
+        Accelerometer::new("accel-1".to_string(), cfg.sensors.accel_1_rate_per_sec);
+    let mut accel_2 =
+        Accelerometer::new("accel-2".to_string(), cfg.sensors.accel_2_rate_per_sec);
+    let mut force_1 =
+        ForceSensor::new("force-1".to_string(), cfg.sensors.force_1_rate_per_sec);
 
     thermo_1.start();
     thermo_2.start();
