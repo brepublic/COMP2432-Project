@@ -37,7 +37,14 @@ fn main() {
     .expect("Failed to set Ctrl+C handler");
 
     // 1. Create a shared buffer (capacity 5000, enough for bursts)
-    let buffer = SharedBuffer::new(5000);
+    // Optional debug mode: fail fast when the buffer is full.
+    let fail_on_full = std::env::var("GATEWAY_FAIL_ON_FULL")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false);
+    if fail_on_full {
+        println!("Debug mode enabled: process will panic if SharedBuffer gets full.");
+    }
+    let buffer = SharedBuffer::new_with_policy(5000, fail_on_full);
 
     // 2. Create and start sensors
     let mut thermo_1 = Thermometer::new("thermo-1".to_string(), 10);

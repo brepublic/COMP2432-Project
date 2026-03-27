@@ -21,20 +21,35 @@ pub struct SharedBuffer {
     queue: Mutex<VecDeque<SensorReading>>,
     cond: Condvar,
     capacity: usize,
+    fail_on_full: bool,
 }
 
 impl SharedBuffer {
+    #[allow(dead_code)]
     pub fn new(capacity: usize) -> Arc<Self> {
+        Self::new_with_policy(capacity, false)
+    }
+
+    pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
             cond: Condvar::new(),
             capacity,
+            fail_on_full,
         })
     }
 
     /// Push a reading into the buffer. If the buffer is full, block until space is available.
     pub fn push(&self, reading: SensorReading) {
         let mut queue = self.queue.lock().unwrap();
+        if self.fail_on_full && queue.len() >= self.capacity {
+            panic!(
+                "SharedBuffer overflow detected: len={} capacity={}. \
+Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
+                queue.len(),
+                self.capacity
+            );
+        }
         while queue.len() >= self.capacity {
             queue = self.cond.wait(queue).unwrap();
         }
