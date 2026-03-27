@@ -8,6 +8,7 @@ use serde::Serialize;
 
 mod models;
 use models::{AggregatedFrame, Anomaly, SensorStats};
+mod resource;
 
 const DATA_DIR: &str = "./data";
 const MAX_LATEST_FRAMES: usize = 10;
@@ -65,6 +66,23 @@ async fn load_all_frames_on_pool() -> Vec<AggregatedFrame> {
         .unwrap_or_default()
 }
 
+fn load_template_sync(name: &str) -> String {
+    let rel_path = format!("templates/{}", name);
+    match resource::locate_resource(&rel_path) {
+        Some(path) => std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| format!("<!-- Failed to read template {rel_path}: {e} -->")),
+        None => format!("<!-- Template not found: {rel_path} -->"),
+    }
+}
+
+async fn load_template(name: &'static str) -> String {
+    // Template reading is blocking IO; keep it off async executor threads.
+    tokio::task::spawn_blocking(move || load_template_sync(name))
+        .await
+        .unwrap_or_else(|_| format!("<!-- Failed to load template: {name} -->"))
+}
+
+#[allow(dead_code)]
 fn render_latest_page() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -137,6 +155,7 @@ fn render_latest_page() -> String {
 </html>"#.to_string()
 }
 
+#[allow(dead_code)]
 fn render_stats_page() -> String {
     r#"<!DOCTYPE html>
 <html>
@@ -196,6 +215,7 @@ fn render_stats_page() -> String {
 </html>"#.to_string()
 }
 
+#[allow(dead_code)]
 fn render_sensor_page(sensor_id: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -289,57 +309,45 @@ fn render_sensor_page(sensor_id: &str) -> String {
 }
 
 #[handler]
-async fn root() -> Text<&'static str> {
-    Text::Html(
-        r#"<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>Sensor Dashboard</title>
-</head>
-<body>
-    <h1>Sensor Dashboard</h1>
-    <p>Live pages:</p>
-    <ul>
-        <li><a href="/latest">/latest</a> - latest aggregated frames (auto refresh)</li>
-        <li><a href="/stats">/stats</a> - overall statistics (auto refresh)</li>
-        <li><a href="/sensor/thermo-1">/sensor/&lt;id&gt;</a> - per-sensor live data (auto refresh)</li>
-    </ul>
-    <p>JSON APIs:</p>
-    <ul>
-        <li><code>/api/latest</code></li>
-        <li><code>/api/stats</code></li>
-        <li><code>/api/sensor/&lt;id&gt;</code></li>
-    </ul>
-</body>
-</html>"#,
-    )
+async fn root() -> Text<String> {
+    let html = load_template("index.html").await;
+    Text::Html(html)
 }
 
 #[handler]
 async fn latest_page() -> Text<String> {
-    Text::Html(render_latest_page())
+    let html = load_template("latest.html").await;
+    Text::Html(html)
 }
 
 #[handler]
 async fn stats_page() -> Text<String> {
-    Text::Html(render_stats_page())
+    let html = load_template("stats.html").await;
+    Text::Html(html)
 }
 
 #[handler]
 async fn sensor_page(req: &mut Request) -> Text<String> {
-    let sensor_id = req
-        .param::<String>("id")
-        .unwrap_or_else(|| "unknown".to_string());
-    Text::Html(render_sensor_page(&sensor_id))
+    let _ = req;
+    let html = load_template("sensor.html").await;
+    Text::Html(html)
+}
+
+#[handler]
+async fn sensor_index_page() -> Text<String> {
+    let html = load_template("sensor_index.html").await;
+    Text::Html(html)
 }
 
 #[handler]
 async fn latest_api() -> Json<Vec<AggregatedFrame>> {
     let mut frames = load_all_frames_on_pool().await;
-    frames.sort_by_key(|f| f.window_end);
-    let latest: Vec<AggregatedFrame> = frames.into_iter().rev().take(MAX_LATEST_FRAMES).collect();
-    Json(latest)
+    frames.sort_by(|a, b| {
+        b.window_end
+            .cmp(&a.window_end)
+            .then_with(|| b.frame_id.cmp(&a.frame_id))
+    });
+    Json(frames.into_iter().take(MAX_LATEST_FRAMES).collect())
 }
 
 #[handler]
@@ -412,7 +420,6 @@ async fn sensor_api(req: &mut Request) -> Json<SensorLiveView> {
 }
 
 pub async fn run(addr: &'static str) {
-    let sensor_router = Router::with_path("sensor").push(Router::with_path("<id>").get(sensor_page));
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
         .push(Router::with_path("stats").get(stats_api))
@@ -422,7 +429,8 @@ pub async fn run(addr: &'static str) {
         .get(root)
         .push(Router::with_path("latest").get(latest_page))
         .push(Router::with_path("stats").get(stats_page))
-        .push(sensor_router)
+        .push(Router::with_path("sensor").get(sensor_index_page))
+        .push(Router::with_path("sensor/<id>").get(sensor_page))
         .push(api_router);
 
     let listener = TcpListener::new(addr).bind().await;

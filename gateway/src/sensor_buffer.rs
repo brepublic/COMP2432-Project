@@ -1,6 +1,7 @@
 // gateway/src/sensor_buffer.rs
 
-use std::sync::{Arc, Mutex, Condvar};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -22,6 +23,8 @@ pub struct SharedBuffer {
     cond: Condvar,
     capacity: usize,
     fail_on_full: bool,
+    pushed_total: AtomicU64,
+    popped_total: AtomicU64,
 }
 
 impl SharedBuffer {
@@ -36,6 +39,8 @@ impl SharedBuffer {
             cond: Condvar::new(),
             capacity,
             fail_on_full,
+            pushed_total: AtomicU64::new(0),
+            popped_total: AtomicU64::new(0),
         })
     }
 
@@ -54,6 +59,7 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
             queue = self.cond.wait(queue).unwrap();
         }
         queue.push_back(reading);
+        self.pushed_total.fetch_add(1, Ordering::Relaxed);
         self.cond.notify_one(); // Wake a potential consumer
     }
 
@@ -79,7 +85,9 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         if queue.is_empty() {
             None
         } else {
-            Some(queue.pop_front().unwrap())
+            let val = queue.pop_front().unwrap();
+            self.popped_total.fetch_add(1, Ordering::Relaxed);
+            Some(val)
         }
     }
 
@@ -91,5 +99,13 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
     /// Buffer capacity.
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Total number of readings pushed/popped since start.
+    pub fn totals(&self) -> (u64, u64) {
+        (
+            self.pushed_total.load(Ordering::Relaxed),
+            self.popped_total.load(Ordering::Relaxed),
+        )
     }
 }

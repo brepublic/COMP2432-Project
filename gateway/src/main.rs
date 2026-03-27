@@ -30,6 +30,7 @@ const THERMO_2_RATE_PER_SEC: u32 = 50;
 const ACCEL_1_RATE_PER_SEC: u32 = 100;
 const ACCEL_2_RATE_PER_SEC: u32 = 100;
 const FORCE_1_RATE_PER_SEC: u32 = 75;
+const BUFFER_DEBUG_ENV: &str = "GATEWAY_DEBUG_BUFFER";
 
 fn main() {
     // Create an atomic boolean as a global stop flag
@@ -52,6 +53,10 @@ fn main() {
         println!("Debug mode enabled: process will panic if SharedBuffer gets full.");
     }
     let buffer = SharedBuffer::new_with_policy(5000, fail_on_full);
+    let buffer_debug = std::env::var(BUFFER_DEBUG_ENV)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
+        .unwrap_or(false);
+    let (mut last_pushed, mut last_popped) = buffer.totals();
 
     // 2. Create and start sensors
     let mut thermo_1 = Thermometer::new("thermo-1".to_string(), THERMO_1_RATE_PER_SEC);
@@ -170,11 +175,29 @@ fn main() {
     // 7. Main thread monitors running state and prints buffer usage every second (optional)
     while running.load(Ordering::SeqCst) {
         let len = buffer.len();
-        println!(
-            "Buffer usage: {}/{} ({:.1}%)",
-            len,
-            buffer.capacity(),
-                (len as f64 / buffer.capacity() as f64) * 100.0);
+        if buffer_debug {
+            let (pushed, popped) = buffer.totals();
+            let dp = pushed.saturating_sub(last_pushed);
+            let dpp = popped.saturating_sub(last_popped);
+            last_pushed = pushed;
+            last_popped = popped;
+
+            println!(
+                "Buffer: len={}/{} ({:.1}%), pushed+{} /s, popped+{} /s",
+                len,
+                buffer.capacity(),
+                (len as f64 / buffer.capacity() as f64) * 100.0,
+                dp,
+                dpp
+            );
+        } else {
+            println!(
+                "Buffer usage: {}/{} ({:.1}%)",
+                len,
+                buffer.capacity(),
+                (len as f64 / buffer.capacity() as f64) * 100.0
+            );
+        }
         
         // Check whether dashboard thread is still alive
         if dashboard_handle.is_finished() {
