@@ -423,14 +423,19 @@ pub async fn run(addr: &'static str) {
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
         .push(Router::with_path("stats").get(stats_api))
-        .push(Router::with_path("sensor/<id>").get(sensor_api));
+        .push(
+            Router::with_path("sensor").push(Router::with_path("{id}").get(sensor_api)),
+        );
+
+    let sensor_router = Router::with_path("sensor")
+        .get(sensor_index_page)
+        .push(Router::with_path("{id}").get(sensor_page));
 
     let router = Router::new()
         .get(root)
         .push(Router::with_path("latest").get(latest_page))
         .push(Router::with_path("stats").get(stats_page))
-        .push(Router::with_path("sensor").get(sensor_index_page))
-        .push(Router::with_path("sensor/<id>").get(sensor_page))
+        .push(sensor_router)
         .push(api_router);
 
     let listener = TcpListener::new(addr).bind().await;

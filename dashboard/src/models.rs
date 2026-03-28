@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorStats {
     pub count: usize,
@@ -13,7 +12,6 @@ pub struct SensorStats {
     pub stddev: f32,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Anomaly {
     pub sensor_id: String,
@@ -22,7 +20,6 @@ pub struct Anomaly {
     pub description: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedFrame {
     pub frame_id: u64,
