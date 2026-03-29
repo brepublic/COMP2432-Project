@@ -1,7 +1,7 @@
 // gateway/src/storage.rs
 
-use std::fs::{OpenOptions, File};
-use std::io::{Write, BufRead, BufReader};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::RwLock;
 use std::path::PathBuf;
 use chrono::Local;
@@ -43,37 +43,4 @@ impl DataStorage {
         writeln!(file, "{}", json).expect("Failed to write data file");
     }
 
-    /// Read all aggregated frames (from all data files)
-    #[allow(dead_code)]
-    pub fn read_all(&self) -> Vec<AggregatedFrame> {
-        // Acquire a read lock so multiple threads can read concurrently.
-        let _lock = self.file_lock.read().unwrap();
-
-        let mut frames = Vec::new();
-        let entries =
-            std::fs::read_dir(&self.base_path).expect("Failed to read data directory");
-
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("json"))
-            .collect();
-        // Provide deterministic ordering for debugging and downstream consumers.
-        paths.sort();
-
-        for path in paths {
-            let file = File::open(&path).expect("Failed to open file");
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line.unwrap();
-                match serde_json::from_str::<AggregatedFrame>(&line) {
-                    Ok(frame) => frames.push(frame),
-                    Err(err) => eprintln!(
-                        "Warning: failed to parse frame JSON from {}: {err}",
-                        path.display()
-                    ),
-                }
-            }
-        }
-        frames
-    }
 }

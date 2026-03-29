@@ -384,6 +384,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "common_models"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "content_inspector"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -539,6 +546,7 @@ name = "dashboard"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "common_models",
  "hotaru",
  "hotaru_core",
  "salvo",
@@ -855,6 +863,7 @@ name = "gateway"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "common_models",
  "ctrlc",
  "dashboard",
  "futures",

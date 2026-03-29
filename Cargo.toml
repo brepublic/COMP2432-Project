@@ -4,6 +4,7 @@ members = [
     "sensor_sim",
     "dashboard",
     "gateway",
+    "common_models",
 ]
 resolver = "3"
 

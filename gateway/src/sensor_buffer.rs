@@ -28,11 +28,6 @@ pub struct SharedBuffer {
 }
 
 impl SharedBuffer {
-    #[allow(dead_code)]
-    pub fn new(capacity: usize) -> Arc<Self> {
-        Self::new_with_policy(capacity, false)
-    }
-
     pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
@@ -64,17 +59,6 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
     }
 
     /// Pop a reading from the buffer. If the buffer is empty, block until data arrives.
-    #[allow(dead_code)]
-    pub fn pop(&self) -> SensorReading {
-        let mut queue = self.queue.lock().unwrap();
-        while queue.is_empty() {
-            queue = self.cond.wait(queue).unwrap();
-        }
-        let val = queue.pop_front().unwrap();
-        self.cond.notify_one(); // Wake a potential producer
-        val
-    }
-
     /// Pop with timeout. Returns `None` on timeout.
     pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
         let mut queue = self.queue.lock().unwrap();

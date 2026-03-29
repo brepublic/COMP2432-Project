@@ -13,3 +13,4 @@ toml = "0.8"
 ctrlc = "3.2"
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+common_models = { path = "../common_models" }
