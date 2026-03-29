@@ -249,11 +249,22 @@ impl SensorBufferManager {
                     }
                 }
 
-                if let Some(reading) = sensor.read() {
-                    let ts = now_millis();
-                    shared.push(wrap(reading, sensor_id.clone(), ts));
-                } else {
+                if available == 0 {
                     thread::sleep(Duration::from_micros(100));
+                    continue;
+                }
+
+                // Drain a burst of already-buffered sensor samples in one scheduling slice.
+                // This keeps up with high-rate producers and protects the tiny sensor queue.
+                let mut drained = 0usize;
+                while running.load(Ordering::SeqCst) && drained < available {
+                    if let Some(reading) = sensor.read() {
+                        let ts = now_millis();
+                        shared.push(wrap(reading, sensor_id.clone(), ts));
+                        drained += 1;
+                    } else {
+                        break;
+                    }
                 }
             }
             // Stop generating data before exiting the thread.
