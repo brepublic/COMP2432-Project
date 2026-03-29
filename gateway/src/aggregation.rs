@@ -1,11 +1,10 @@
 // gateway/src/aggregation.rs
 
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
-use chrono::Utc; // Add chrono dependency
+use std::time::Duration;
 
 use crate::sensor_buffer::{SharedBuffer, SensorReading};
 use crate::storage::DataStorage;
@@ -19,8 +18,11 @@ pub struct AggregationEngine {
     window_duration: Duration,
     num_workers: usize,
     anomaly_threshold: f32,
+
     worker_handles: Vec<thread::JoinHandle<()>>,
+
     shutdown: Arc<AtomicBool>,
+    frame_id: Arc<AtomicU64>,
 }
 
 impl AggregationEngine {
@@ -39,74 +41,104 @@ impl AggregationEngine {
             anomaly_threshold,
             worker_handles: Vec::new(),
             shutdown: Arc::new(AtomicBool::new(false)),
+            frame_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn start(&mut self) {
-        for id in 0..self.num_workers {
+        let window_ms = self.window_duration.as_millis().max(1) as u64;
+        let grace_ms = std::cmp::max(50, window_ms / 2);
+
+        // Pending windows keyed by `window_start`.
+        let pending: Arc<Mutex<BTreeMap<u64, HashMap<String, Vec<SensorReading>>>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+
+        for _ in 0..self.num_workers {
             let buffer = Arc::clone(&self.buffer);
             let storage = Arc::clone(&self.storage);
-            let window_duration = self.window_duration;
-            let threshold = self.anomaly_threshold;
+            let pending = Arc::clone(&pending);
             let shutdown = Arc::clone(&self.shutdown);
+            let frame_id = Arc::clone(&self.frame_id);
+            let threshold = self.anomaly_threshold;
 
-            let handle = thread::spawn(move || {
-                let mut frame_id = id as u64;
-                let mut sensor_data: HashMap<String, Vec<SensorReading>> = HashMap::new();
-
-                // Use std::time::Instant to measure elapsed time; use chrono::Utc for timestamps
-                let mut window_start_instant = std::time::Instant::now();
-                let mut window_start_millis = Utc::now().timestamp_millis() as u64;
-
-                loop {
-                    // Check shutdown signal
-                    if shutdown.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    // Try to pop from the buffer (timeout 10ms)
-                    if let Some(reading) = buffer.pop_timeout(Duration::from_millis(10)) {
-                        let sensor_id = match &reading {
-                            SensorReading::Accel(_, id) => id.clone(),
-                            SensorReading::Force(_, id) => id.clone(),
-                            SensorReading::Thermo(_, id) => id.clone(),
-                        };
-                        sensor_data.entry(sensor_id).or_insert_with(Vec::new).push(reading);
-                    }
-
-                    // Check whether the current window has ended
-                    if window_start_instant.elapsed() >= window_duration {
-                        let window_end_millis = Utc::now().timestamp_millis() as u64;
-                        let mut stats_map = HashMap::new();
-                        let mut anomalies = Vec::new();
-
-                        for (sensor_id, readings) in &sensor_data {
-                            let stats = Self::compute_stats(readings);
-                            Self::detect_anomalies(sensor_id, readings, &stats, threshold, &mut anomalies);
-                            stats_map.insert(sensor_id.clone(), stats);
-                        }
-
-                        let frame = AggregatedFrame {
-                            frame_id,
-                            window_start: window_start_millis,
-                            window_end: window_end_millis,
-                            sensor_stats: stats_map,
-                            anomalies,
-                        };
-
+            let handle = thread::spawn(move || loop {
+                // On shutdown, finalize any remaining pending windows immediately.
+                if shutdown.load(Ordering::SeqCst) && buffer.len() == 0 {
+                    let windows = {
+                        let mut guard = pending.lock().unwrap();
+                        std::mem::take(&mut *guard)
+                    };
+                    for (ws, readings_by_sensor) in windows {
+                        let frame = make_frame(
+                            ws,
+                            ws + window_ms,
+                            readings_by_sensor,
+                            threshold,
+                            &frame_id,
+                            &storage,
+                        );
                         storage.write(frame);
-
-                        // Prepare the next window
-                        window_start_instant = std::time::Instant::now();
-                        window_start_millis = window_end_millis;
-                        sensor_data.clear();
-                        frame_id += 1;
                     }
+                    return;
+                }
+
+                // Pull readings from the shared buffer concurrently.
+                if let Some(reading) = buffer.pop_timeout(Duration::from_millis(10)) {
+                    let ts = reading.timestamp_millis();
+                    let window_start = (ts / window_ms) * window_ms;
+                    let sensor_id = reading.sensor_id().to_string();
+
+                    let mut guard = pending.lock().unwrap();
+                    guard
+                        .entry(window_start)
+                        .or_insert_with(HashMap::new)
+                        .entry(sensor_id)
+                        .or_insert_with(Vec::new)
+                        .push(reading);
+                }
+
+                // Dispatch any windows that are "old enough" (claim by removing under lock).
+                let now_ms = system_now_millis();
+                let ready: Vec<(u64, HashMap<String, Vec<SensorReading>>)> = {
+                    let mut guard = pending.lock().unwrap();
+                    let mut out = Vec::new();
+                    loop {
+                        let ws = if let Some((&ws, _)) = guard.iter().next() {
+                            ws
+                        } else {
+                            break;
+                        };
+                        let we = ws + window_ms;
+                        if now_ms >= we + grace_ms {
+                            let readings_by_sensor = guard.remove(&ws).unwrap();
+                            out.push((ws, readings_by_sensor));
+                        } else {
+                            break;
+                        }
+                    }
+                    out
+                };
+
+                for (ws, readings_by_sensor) in ready {
+                    let frame = make_frame(
+                        ws,
+                        ws + window_ms,
+                        readings_by_sensor,
+                        threshold,
+                        &frame_id,
+                        &storage,
+                    );
+                    storage.write(frame);
                 }
             });
 
             self.worker_handles.push(handle);
         }
+    }
+
+    /// Connect/replace the buffer data source (kept to match the spec interface wording).
+    pub fn connect(&mut self, buffer: Arc<SharedBuffer>) {
+        self.buffer = buffer;
     }
 
     pub fn shutdown(&mut self) {
@@ -117,27 +149,39 @@ impl AggregationEngine {
     }
 
     fn compute_stats(readings: &[SensorReading]) -> SensorStats {
-        let mut count = 0;
+        let mut count = 0usize;
         let mut min = f32::MAX;
         let mut max = f32::MIN;
-        let mut sum = 0.0;
-        let mut sum_sq = 0.0;
+        let mut sum = 0.0f32;
+        let mut sum_sq = 0.0f32;
 
         for r in readings {
             let value = match r {
-                SensorReading::Accel(r, _) => (r.acceleration_x + r.acceleration_y + r.acceleration_z) / 3.0,
-                SensorReading::Force(r, _) => (r.force_x + r.force_y + r.force_z) / 3.0,
-                SensorReading::Thermo(r, _) => r.temperature_celsius,
+                SensorReading::Accel(v, _, _) => {
+                    (v.acceleration_x + v.acceleration_y + v.acceleration_z) / 3.0
+                }
+                SensorReading::Force(v, _, _) => {
+                    (v.force_x + v.force_y + v.force_z) / 3.0
+                }
+                SensorReading::Thermo(v, _, _) => v.temperature_celsius,
             };
             count += 1;
-            if value < min { min = value; }
-            if value > max { max = value; }
+            if value < min {
+                min = value;
+            }
+            if value > max {
+                max = value;
+            }
             sum += value;
             sum_sq += value * value;
         }
 
         let avg = if count > 0 { sum / count as f32 } else { 0.0 };
-        let variance = if count > 0 { (sum_sq / count as f32) - (avg * avg) } else { 0.0 };
+        let variance = if count > 0 {
+            (sum_sq / count as f32) - (avg * avg)
+        } else {
+            0.0
+        };
         let stddev = variance.sqrt();
 
         SensorStats {
@@ -160,10 +204,15 @@ impl AggregationEngine {
     ) {
         for r in readings {
             let value = match r {
-                SensorReading::Accel(r, _) => (r.acceleration_x + r.acceleration_y + r.acceleration_z) / 3.0,
-                SensorReading::Force(r, _) => (r.force_x + r.force_y + r.force_z) / 3.0,
-                SensorReading::Thermo(r, _) => r.temperature_celsius,
+                SensorReading::Accel(v, _, _) => {
+                    (v.acceleration_x + v.acceleration_y + v.acceleration_z) / 3.0
+                }
+                SensorReading::Force(v, _, _) => {
+                    (v.force_x + v.force_y + v.force_z) / 3.0
+                }
+                SensorReading::Thermo(v, _, _) => v.temperature_celsius,
             };
+
             if stats.stddev > 0.0 && (value - stats.avg).abs() > threshold * stats.stddev {
                 anomalies.push(Anomaly {
                     sensor_id: sensor_id.to_string(),
@@ -173,5 +222,48 @@ impl AggregationEngine {
                 });
             }
         }
+    }
+}
+
+fn system_now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn make_frame(
+    window_start: u64,
+    window_end: u64,
+    readings_by_sensor: HashMap<String, Vec<SensorReading>>,
+    threshold: f32,
+    frame_id: &AtomicU64,
+    storage: &DataStorage,
+) -> AggregatedFrame {
+    let mut stats_map: HashMap<String, SensorStats> = HashMap::new();
+    let mut anomalies: Vec<Anomaly> = Vec::new();
+
+    for (sensor_id, readings) in readings_by_sensor {
+        let stats = AggregationEngine::compute_stats(&readings);
+        AggregationEngine::detect_anomalies(
+            &sensor_id,
+            &readings,
+            &stats,
+            threshold,
+            &mut anomalies,
+        );
+        stats_map.insert(sensor_id, stats);
+    }
+
+    let fid = frame_id.fetch_add(1, Ordering::SeqCst);
+    let _ = storage; // keep signature symmetrical; storage used by caller.
+
+    AggregatedFrame {
+        frame_id: fid,
+        window_start,
+        window_end,
+        sensor_stats: stats_map,
+        anomalies,
     }
 }

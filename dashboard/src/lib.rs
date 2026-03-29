@@ -192,10 +192,25 @@ async fn sensor_api(req: &mut Request) -> Json<SensorLiveView> {
     }
 }
 
+#[handler]
+async fn range_api(req: &mut Request) -> Json<Vec<AggregatedFrame>> {
+    // Query params: from/to are window timestamps in millis.
+    let from = req.query::<u64>("from").unwrap_or(0);
+    let to = req.query::<u64>("to").unwrap_or(u64::MAX);
+
+    let mut frames = load_all_frames_on_pool().await;
+    frames.retain(|f| f.window_end >= from && f.window_end <= to);
+
+    // Return newest-first for convenience.
+    frames.sort_by(|a, b| b.window_end.cmp(&a.window_end).then_with(|| b.frame_id.cmp(&a.frame_id)));
+    Json(frames)
+}
+
 pub async fn run(addr: &'static str) {
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
         .push(Router::with_path("stats").get(stats_api))
+        .push(Router::with_path("range").get(range_api))
         .push(
             Router::with_path("sensor").push(Router::with_path("{id}").get(sensor_api)),
         );

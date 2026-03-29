@@ -19,7 +19,7 @@ mod sensor_buffer;
 mod aggregation;
 mod storage;
 
-use sensor_buffer::SharedBuffer;
+use sensor_buffer::{SensorBufferManager, SensorReading};
 use aggregation::AggregationEngine;
 use storage::DataStorage;
 
@@ -103,19 +103,18 @@ fn main() {
     })
     .expect("Failed to set Ctrl+C handler");
 
-    // 1. Create a shared buffer (capacity 5000, enough for bursts)
+    // 1. Create a buffer manager (capacity from config).
     // Optional debug mode: fail fast when the buffer is full.
     let fail_on_full = std::env::var("GATEWAY_FAIL_ON_FULL")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(false);
     if fail_on_full {
-        println!("Debug mode enabled: process will panic if SharedBuffer gets full.");
+        println!("Debug mode enabled: process will panic if buffer gets full.");
     }
-    let buffer = SharedBuffer::new_with_policy(cfg.buffer.capacity, fail_on_full);
+    let mut buffer_manager = SensorBufferManager::new_with_policy(cfg.buffer.capacity, fail_on_full);
     let buffer_debug = std::env::var(BUFFER_DEBUG_ENV)
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(false);
-    let (mut last_pushed, mut last_popped) = buffer.totals();
 
     // 2. Create and start sensors
     let mut thermo_1 =
@@ -129,91 +128,21 @@ fn main() {
     let mut force_1 =
         ForceSensor::new("force-1".to_string(), cfg.sensors.force_1_rate_per_sec);
 
-    thermo_1.start();
-    thermo_2.start();
-    accel_1.start();
-    accel_2.start();
-    force_1.start();
-
-    // 3. Spawn reader threads for each sensor and push readings to the buffer
-    let buffer_clone = buffer.clone();
-    let running_clone = running.clone();
-    let handle_t1 = thread::spawn(move || {
-        let mut sensor = thermo_1;
-        while running_clone.load(Ordering::SeqCst) {
-            if let Some(reading) = sensor.read() {
-                let enveloped = sensor_buffer::SensorReading::Thermo(reading, sensor.id());
-                buffer_clone.push(enveloped);
-            } else {
-                thread::sleep(Duration::from_micros(100));
-            }
-        }
-        sensor.stop();
-        println!("thermo-1 reader stopped");
+    // 3. Register sensors (spawns one reader thread per sensor).
+    buffer_manager.register_sensor(thermo_1, |reading, id, ts| {
+        SensorReading::Thermo(reading, id, ts)
     });
-
-    let buffer_clone = buffer.clone();
-    let running_clone = running.clone();
-    let handle_t2 = thread::spawn(move || {
-        let mut sensor = thermo_2;
-        while running_clone.load(Ordering::SeqCst) {
-            if let Some(reading) = sensor.read() {
-                let enveloped = sensor_buffer::SensorReading::Thermo(reading, sensor.id());
-                buffer_clone.push(enveloped);
-            } else {
-                thread::sleep(Duration::from_micros(100));
-            }
-        }
-        sensor.stop();
-        println!("thermo-2 reader stopped");
+    buffer_manager.register_sensor(thermo_2, |reading, id, ts| {
+        SensorReading::Thermo(reading, id, ts)
     });
-
-    let buffer_clone = buffer.clone();
-    let running_clone = running.clone();
-    let handle_a1 = thread::spawn(move || {
-        let mut sensor = accel_1;
-        while running_clone.load(Ordering::SeqCst) {
-            if let Some(reading) = sensor.read() {
-                let enveloped = sensor_buffer::SensorReading::Accel(reading, sensor.id());
-                buffer_clone.push(enveloped);
-            } else {
-                thread::sleep(Duration::from_micros(100));
-            }
-        }
-        sensor.stop();
-        println!("accel-1 reader stopped");
+    buffer_manager.register_sensor(accel_1, |reading, id, ts| {
+        SensorReading::Accel(reading, id, ts)
     });
-
-    let buffer_clone = buffer.clone();
-    let running_clone = running.clone();
-    let handle_a2 = thread::spawn(move || {
-        let mut sensor = accel_2;
-        while running_clone.load(Ordering::SeqCst) {
-            if let Some(reading) = sensor.read() {
-                let enveloped = sensor_buffer::SensorReading::Accel(reading, sensor.id());
-                buffer_clone.push(enveloped);
-            } else {
-                thread::sleep(Duration::from_micros(100));
-            }
-        }
-        sensor.stop();
-        println!("accel-2 reader stopped");
+    buffer_manager.register_sensor(accel_2, |reading, id, ts| {
+        SensorReading::Accel(reading, id, ts)
     });
-
-    let buffer_clone = buffer.clone();
-    let running_clone = running.clone();
-    let handle_f1 = thread::spawn(move || {
-        let mut sensor = force_1;
-        while running_clone.load(Ordering::SeqCst) {
-            if let Some(reading) = sensor.read() {
-                let enveloped = sensor_buffer::SensorReading::Force(reading, sensor.id());
-                buffer_clone.push(enveloped);
-            } else {
-                thread::sleep(Duration::from_micros(100));
-            }
-        }
-        sensor.stop();
-        println!("force-1 reader stopped");
+    buffer_manager.register_sensor(force_1, |reading, id, ts| {
+        SensorReading::Force(reading, id, ts)
     });
 
     // 4. Create data storage (data files saved to ./data)
@@ -221,7 +150,7 @@ fn main() {
 
     // 5. Create aggregation engine (4 workers, 1s window, anomaly threshold 3.0)
     let mut engine = AggregationEngine::new(
-        buffer.clone(),
+        buffer_manager.shared(),
         storage.clone(),
         Duration::from_secs(1),
         4,
@@ -230,36 +159,39 @@ fn main() {
     engine.start(); // Start aggregation worker threads
 
     // 6. Start the Web server thread (dashboard)
+    let dashboard_addr =
+        std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string());
 
-    let dashboard_handle = thread::spawn(|| {
+    let dashboard_handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(dashboard::run("127.0.0.1:5800"));
+        // `salvo::TcpListener::new(addr)` requires `&'static str` for the async task lifecycle.
+        let dashboard_addr_static: &'static str =
+            Box::leak(dashboard_addr.into_boxed_str());
+        rt.block_on(dashboard::run(dashboard_addr_static));
     });
 
     // 7. Main thread monitors running state and prints buffer usage every second (optional)
     while running.load(Ordering::SeqCst) {
-        let len = buffer.len();
         if buffer_debug {
-            let (pushed, popped) = buffer.totals();
-            let dp = pushed.saturating_sub(last_pushed);
-            let dpp = popped.saturating_sub(last_popped);
-            last_pushed = pushed;
-            last_popped = popped;
+            let s = buffer_manager.utilization_stats();
 
             println!(
                 "Buffer: len={}/{} ({:.1}%), pushed+{} /s, popped+{} /s",
-                len,
-                buffer.capacity(),
-                (len as f64 / buffer.capacity() as f64) * 100.0,
-                dp,
-                dpp
+                s.len,
+                s.capacity,
+                s.utilization_ratio * 100.0,
+                s.pushed_per_sec,
+                s.popped_per_sec
             );
         } else {
+            let s = buffer_manager.utilization_stats();
+            let len = s.len;
+            let cap = s.capacity;
             println!(
                 "Buffer usage: {}/{} ({:.1}%)",
                 len,
-                buffer.capacity(),
-                (len as f64 / buffer.capacity() as f64) * 100.0
+                cap,
+                s.utilization_ratio * 100.0
             );
         }
         
@@ -272,16 +204,11 @@ fn main() {
     }
 
     // 8. Stop signal received: perform cleanup
+    println!("Stopping reader threads...");
+    buffer_manager.shutdown();
+
     println!("Stopping aggregation engine...");
     engine.shutdown();
-
-    println!("Waiting for reader threads to finish...");
-    // Wait for all reader threads to finish (they exit after `running` becomes false)
-    handle_t1.join().unwrap();
-    handle_t2.join().unwrap();
-    handle_a1.join().unwrap();
-    handle_a2.join().unwrap();
-    handle_f1.join().unwrap();
 
     println!("Stopping Web server...");
     // The dashboard does not currently provide a graceful shutdown API.
