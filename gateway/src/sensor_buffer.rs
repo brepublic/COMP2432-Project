@@ -41,7 +41,8 @@ impl SensorReading {
 /// Thread-safe shared buffer (bounded blocking queue).
 pub struct SharedBuffer {
     queue: Mutex<VecDeque<SensorReading>>,
-    cond: Condvar,
+    not_empty: Condvar,
+    not_full: Condvar,
     capacity: usize,
     fail_on_full: bool,
     pushed_total: AtomicU64,
@@ -53,7 +54,8 @@ impl SharedBuffer {
     pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
-            cond: Condvar::new(),
+            not_empty: Condvar::new(),
+            not_full: Condvar::new(),
             capacity,
             fail_on_full,
             pushed_total: AtomicU64::new(0),
@@ -75,25 +77,25 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         }
         while queue.len() >= self.capacity {
             self.full_waits_total.fetch_add(1, Ordering::Relaxed);
-            queue = self.cond.wait(queue).unwrap();
+            queue = self.not_full.wait(queue).unwrap();
         }
         queue.push_back(reading);
         self.pushed_total.fetch_add(1, Ordering::Relaxed);
-        self.cond.notify_one(); // Wake a potential consumer
+        self.not_empty.notify_one(); // Wake a potential consumer
     }
 
     /// Pop a reading from the buffer, blocking until data arrives.
     pub fn pop(&self) -> SensorReading {
         let mut queue = self.queue.lock().unwrap();
         queue = self
-            .cond
+            .not_empty
             .wait_while(queue, |q| q.is_empty())
             .unwrap();
 
         let val = queue.pop_front().unwrap();
         self.popped_total.fetch_add(1, Ordering::Relaxed);
         // Wake a potential producer waiting for free capacity.
-        self.cond.notify_one();
+        self.not_full.notify_one();
         val
     }
 
@@ -101,7 +103,7 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
     /// Pop with timeout. Returns `None` on timeout.
     pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
         let mut queue = self.queue.lock().unwrap();
-        let result = self.cond
+        let result = self.not_empty
             .wait_timeout_while(queue, timeout, |q| q.is_empty())
             .unwrap();
         queue = result.0;
@@ -111,7 +113,7 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
             let val = queue.pop_front().unwrap();
             self.popped_total.fetch_add(1, Ordering::Relaxed);
             // Wake a potential producer waiting for free capacity.
-            self.cond.notify_one();
+            self.not_full.notify_one();
             Some(val)
         }
     }
@@ -122,9 +124,15 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         let res = queue.pop_front();
         if res.is_some() {
             self.popped_total.fetch_add(1, Ordering::Relaxed);
-            self.cond.notify_one(); // Wake a potential producer.
+            self.not_full.notify_one(); // Wake a potential producer.
         }
         res
+    }
+
+    /// Wake all producers/consumers blocked on the buffer.
+    pub fn wake_all(&self) {
+        self.not_empty.notify_all();
+        self.not_full.notify_all();
     }
 
     /// Current queue length.
@@ -381,6 +389,8 @@ impl SensorBufferManager {
     /// Shutdown all reader threads cleanly.
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        // Ensure reader threads blocked on full-buffer waits can re-check `running`.
+        self.shared.wake_all();
         while let Some(handle) = self.reader_handles.pop() {
             handle.join().unwrap();
         }

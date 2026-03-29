@@ -7,5 +7,5 @@ force_1_rate_per_sec = 50
 
 [buffer]
 # SharedBuffer capacity (number of readings).
-capacity = 1
+capacity = 500000
 
