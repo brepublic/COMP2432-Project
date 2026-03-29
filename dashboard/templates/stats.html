@@ -13,6 +13,10 @@
         .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
         .sensor-list { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
         .chip { background: #e2e8f0; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+        .ok { color: #166534; }
+        .warn { color: #991b1b; font-weight: 700; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #fff; }
+        th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
         a { color: #0969da; }
     </style>
 </head>
@@ -33,12 +37,37 @@
     <h3 style="margin-top:16px;">Sensors Seen</h3>
     <div id="sensor-list" class="sensor-list"></div>
 
+    <h3 style="margin-top:16px;">Sensor Internal Buffer (128-ring, 127 usable)</h3>
+    <div id="buffer-alert" class="meta">Loading buffer telemetry...</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Sensor</th>
+                <th>Current</th>
+                <th>Capacity</th>
+                <th>Usage</th>
+                <th>Peak</th>
+                <th>Peak Usage</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody id="buffer-rows">
+            <tr><td colspan="7">Loading...</td></tr>
+        </tbody>
+    </table>
+
     <script>
         async function refresh() {
             try {
-                const response = await fetch("/api/stats", { cache: "no-store" });
-                if (!response.ok) throw new Error("HTTP " + response.status);
-                const data = await response.json();
+                const [statsResp, bufferResp] = await Promise.all([
+                    fetch("/api/stats", { cache: "no-store" }),
+                    fetch("/api/buffer", { cache: "no-store" }),
+                ]);
+                if (!statsResp.ok) throw new Error("stats HTTP " + statsResp.status);
+                if (!bufferResp.ok) throw new Error("buffer HTTP " + bufferResp.status);
+
+                const data = await statsResp.json();
+                const buffer = await bufferResp.json();
                 document.getElementById("total-frames").textContent = data.total_frames ?? "-";
                 document.getElementById("total-anomalies").textContent = data.total_anomalies ?? "-";
                 document.getElementById("latest-frame-id").textContent = data.latest_frame_id ?? "-";
@@ -49,8 +78,40 @@
                 list.innerHTML = sensors.length
                     ? sensors.map(s => `<span class="chip">${s}</span>`).join("")
                     : `<span class="chip">No sensors yet</span>`;
+
+                const warnings = Array.isArray(buffer.warnings) ? buffer.warnings : [];
+                const alertEl = document.getElementById("buffer-alert");
+                if (warnings.length > 0) {
+                    const level = buffer.any_full ? "FULL" : "NEAR FULL";
+                    alertEl.className = "warn";
+                    alertEl.textContent = `Warning (${level}): ` + warnings.join(" | ");
+                } else {
+                    alertEl.className = "ok";
+                    alertEl.textContent = "All sensor internal buffers are in safe range.";
+                }
+
+                const rowsEl = document.getElementById("buffer-rows");
+                const sensorsBuf = Array.isArray(buffer.sensors) ? buffer.sensors : [];
+                rowsEl.innerHTML = sensorsBuf.length
+                    ? sensorsBuf.map((s) => {
+                        const status = s.full ? "FULL" : (s.near_full ? "NEAR FULL" : "OK");
+                        const rowClass = s.full || s.near_full ? "warn" : "ok";
+                        return `<tr class="${rowClass}">
+                            <td>${s.sensor_id}</td>
+                            <td>${s.current_len}</td>
+                            <td>${s.capacity}</td>
+                            <td>${(Number(s.utilization_ratio) * 100).toFixed(1)}%</td>
+                            <td>${s.peak_len}</td>
+                            <td>${(Number(s.peak_utilization_ratio) * 100).toFixed(1)}%</td>
+                            <td>${status}</td>
+                        </tr>`;
+                    }).join("")
+                    : '<tr><td colspan="7">No sensor buffer data yet.</td></tr>';
             } catch (error) {
                 document.getElementById("sensor-list").innerHTML = `<span class="chip">Failed to fetch data: ${error}</span>`;
+                document.getElementById("buffer-alert").className = "warn";
+                document.getElementById("buffer-alert").textContent = `Failed to fetch buffer telemetry: ${error}`;
+                document.getElementById("buffer-rows").innerHTML = `<tr><td colspan="7">Failed to fetch data: ${error}</td></tr>`;
             }
         }
         refresh();

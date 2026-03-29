@@ -28,6 +28,10 @@ use storage::DataStorage;
 // Sensor generation rates (events per second).
 const BUFFER_DEBUG_ENV: &str = "GATEWAY_DEBUG_BUFFER";
 const GATEWAY_CONFIG_ENV: &str = "GATEWAY_CONFIG";
+// sensor_sim uses a ring queue of size 128, but this queue design keeps one slot
+// empty to distinguish full vs empty, so usable capacity is 127.
+const SENSOR_INTERNAL_BUFFER_USABLE_CAPACITY: usize = 127;
+const SENSOR_NEAR_FULL_RATIO: f64 = 0.85;
 
 #[derive(Debug, Deserialize)]
 struct GatewayConfig {
@@ -172,6 +176,24 @@ fn main() {
 
     // 7. Main thread monitors running state and prints buffer usage every second (optional)
     while running.load(Ordering::SeqCst) {
+        let sensor_buffers = buffer_manager.sensor_internal_buffers_snapshot(
+            SENSOR_INTERNAL_BUFFER_USABLE_CAPACITY,
+            SENSOR_NEAR_FULL_RATIO,
+        );
+        dashboard::set_buffer_telemetry(sensor_buffers.clone());
+
+        if sensor_buffers.any_full {
+            println!("WARNING: at least one sensor internal buffer is FULL!");
+            for warning in &sensor_buffers.warnings {
+                println!("  - {}", warning);
+            }
+        } else if sensor_buffers.any_near_full {
+            println!("WARNING: at least one sensor internal buffer is near full.");
+            for warning in &sensor_buffers.warnings {
+                println!("  - {}", warning);
+            }
+        }
+
         if buffer_debug {
             let s = buffer_manager.utilization_stats();
 

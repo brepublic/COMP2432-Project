@@ -29,3 +29,23 @@ pub struct AggregatedFrame {
     pub anomalies: Vec<Anomaly>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SensorBufferStatus {
+    pub sensor_id: String,
+    pub current_len: usize,
+    pub capacity: usize,
+    pub peak_len: usize,
+    pub utilization_ratio: f64,
+    pub peak_utilization_ratio: f64,
+    pub near_full: bool,
+    pub full: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferTelemetrySnapshot {
+    pub sensors: Vec<SensorBufferStatus>,
+    pub any_near_full: bool,
+    pub any_full: bool,
+    pub warnings: Vec<String>,
+}
+

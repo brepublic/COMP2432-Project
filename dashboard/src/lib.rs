@@ -2,15 +2,27 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::{OnceLock, RwLock};
 
 use salvo::prelude::*;
 use serde::Serialize;
 
-use common_models::{AggregatedFrame, Anomaly, SensorStats};
+use common_models::{AggregatedFrame, Anomaly, BufferTelemetrySnapshot, SensorStats};
 mod resource;
 
 const DATA_DIR: &str = "./data";
 const MAX_LATEST_FRAMES: usize = 10;
+static BUFFER_TELEMETRY: OnceLock<RwLock<Option<BufferTelemetrySnapshot>>> = OnceLock::new();
+
+fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
+    BUFFER_TELEMETRY.get_or_init(|| RwLock::new(None))
+}
+
+pub fn set_buffer_telemetry(snapshot: BufferTelemetrySnapshot) {
+    if let Ok(mut guard) = buffer_store().write() {
+        *guard = Some(snapshot);
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct SystemStats {
@@ -206,10 +218,31 @@ async fn range_api(req: &mut Request) -> Json<Vec<AggregatedFrame>> {
     Json(frames)
 }
 
+#[handler]
+async fn buffer_api() -> Json<BufferTelemetrySnapshot> {
+    let snapshot = if let Ok(guard) = buffer_store().read() {
+        guard.clone().unwrap_or(BufferTelemetrySnapshot {
+            sensors: Vec::new(),
+            any_near_full: false,
+            any_full: false,
+            warnings: Vec::new(),
+        })
+    } else {
+        BufferTelemetrySnapshot {
+            sensors: Vec::new(),
+            any_near_full: false,
+            any_full: false,
+            warnings: vec!["Failed to read buffer telemetry state".to_string()],
+        }
+    };
+    Json(snapshot)
+}
+
 pub async fn run(addr: &'static str) {
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
         .push(Router::with_path("stats").get(stats_api))
+        .push(Router::with_path("buffer").get(buffer_api))
         .push(Router::with_path("range").get(range_api))
         .push(
             Router::with_path("sensor").push(Router::with_path("{id}").get(sensor_api)),

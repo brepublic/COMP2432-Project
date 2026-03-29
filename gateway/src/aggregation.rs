@@ -69,12 +69,14 @@ impl AggregationEngine {
                         std::mem::take(&mut *guard)
                     };
                     for (ws, readings_by_sensor) in windows {
+                        // Preserve deterministic ordering on shutdown as well.
+                        let fid = frame_id.fetch_add(1, Ordering::SeqCst);
                         let frame = make_frame(
+                            fid,
                             ws,
                             ws + window_ms,
                             readings_by_sensor,
                             threshold,
-                            &frame_id,
                             &storage,
                         );
                         storage.write(frame);
@@ -99,7 +101,7 @@ impl AggregationEngine {
 
                 // Dispatch any windows that are "old enough" (claim by removing under lock).
                 let now_ms = system_now_millis();
-                let ready: Vec<(u64, HashMap<String, Vec<SensorReading>>)> = {
+                let ready: Vec<(u64, u64, HashMap<String, Vec<SensorReading>>)> = {
                     let mut guard = pending.lock().unwrap();
                     let mut out = Vec::new();
                     loop {
@@ -111,7 +113,10 @@ impl AggregationEngine {
                         let we = ws + window_ms;
                         if now_ms >= we + grace_ms {
                             let readings_by_sensor = guard.remove(&ws).unwrap();
-                            out.push((ws, readings_by_sensor));
+                            // Assign frame_id when a window is claimed, not when work finishes.
+                            // This keeps IDs monotonic with window order even under multi-worker races.
+                            let fid = frame_id.fetch_add(1, Ordering::SeqCst);
+                            out.push((fid, ws, readings_by_sensor));
                         } else {
                             break;
                         }
@@ -119,13 +124,13 @@ impl AggregationEngine {
                     out
                 };
 
-                for (ws, readings_by_sensor) in ready {
+                for (fid, ws, readings_by_sensor) in ready {
                     let frame = make_frame(
+                        fid,
                         ws,
                         ws + window_ms,
                         readings_by_sensor,
                         threshold,
-                        &frame_id,
                         &storage,
                     );
                     storage.write(frame);
@@ -234,11 +239,11 @@ fn system_now_millis() -> u64 {
 }
 
 fn make_frame(
+    frame_id: u64,
     window_start: u64,
     window_end: u64,
     readings_by_sensor: HashMap<String, Vec<SensorReading>>,
     threshold: f32,
-    frame_id: &AtomicU64,
     storage: &DataStorage,
 ) -> AggregatedFrame {
     let mut stats_map: HashMap<String, SensorStats> = HashMap::new();
@@ -256,11 +261,10 @@ fn make_frame(
         stats_map.insert(sensor_id, stats);
     }
 
-    let fid = frame_id.fetch_add(1, Ordering::SeqCst);
     let _ = storage; // keep signature symmetrical; storage used by caller.
 
     AggregatedFrame {
-        frame_id: fid,
+        frame_id,
         window_start,
         window_end,
         sensor_stats: stats_map,

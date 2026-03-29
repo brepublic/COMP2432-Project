@@ -1,6 +1,7 @@
 // gateway/src/sensor_buffer.rs
 
 use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -9,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sensor_sim::accelerometer::AccelReading;
 use sensor_sim::force_sensor::ForceReading;
 use sensor_sim::thermometer::ThermoReading;
+use common_models::{BufferTelemetrySnapshot, SensorBufferStatus};
 
 /// Unified sensor reading enum, including the sensor ID.
 #[derive(Debug, Clone)]
@@ -154,6 +156,13 @@ pub struct SensorBufferManager {
     running: Arc<AtomicBool>,
     reader_handles: Vec<thread::JoinHandle<()>>,
     last_rates_snapshot: Mutex<(u64, u64, u64)>,
+    per_sensor: Arc<Mutex<HashMap<String, SensorQueueSnapshot>>>,
+}
+
+#[derive(Debug, Clone)]
+struct SensorQueueSnapshot {
+    current_len: usize,
+    peak_len: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -180,6 +189,7 @@ impl SensorBufferManager {
             reader_handles: Vec::new(),
             // (last_pushed, last_popped, last_ts_ms)
             last_rates_snapshot: Mutex::new((0, 0, now_millis())),
+            per_sensor: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -206,9 +216,31 @@ impl SensorBufferManager {
         let sensor_id = sensor.id();
         let running = self.running.clone();
         let shared = self.shared.clone();
+        let per_sensor = Arc::clone(&self.per_sensor);
+
+        {
+            let mut guard = self.per_sensor.lock().unwrap();
+            guard.entry(sensor_id.clone()).or_insert(SensorQueueSnapshot {
+                current_len: 0,
+                peak_len: 0,
+            });
+        }
 
         let reader_handle = thread::spawn(move || {
             while running.load(Ordering::SeqCst) {
+                let available = sensor.available();
+                {
+                    let mut guard = per_sensor.lock().unwrap();
+                    let entry = guard.entry(sensor_id.clone()).or_insert(SensorQueueSnapshot {
+                        current_len: 0,
+                        peak_len: 0,
+                    });
+                    entry.current_len = available;
+                    if available > entry.peak_len {
+                        entry.peak_len = available;
+                    }
+                }
+
                 if let Some(reading) = sensor.read() {
                     let ts = now_millis();
                     shared.push(wrap(reading, sensor_id.clone(), ts));
@@ -281,6 +313,68 @@ impl SensorBufferManager {
             pushed_per_sec,
             popped_per_sec,
             full_waits_total,
+        }
+    }
+
+    pub fn sensor_internal_buffers_snapshot(
+        &self,
+        per_sensor_capacity: usize,
+        near_full_ratio: f64,
+    ) -> BufferTelemetrySnapshot {
+        let guard = self.per_sensor.lock().unwrap();
+        let mut sensors = Vec::with_capacity(guard.len());
+        let mut warnings = Vec::new();
+        let mut any_near_full = false;
+        let mut any_full = false;
+
+        for (sensor_id, sample) in guard.iter() {
+            let current_ratio = if per_sensor_capacity == 0 {
+                0.0
+            } else {
+                sample.current_len as f64 / per_sensor_capacity as f64
+            };
+            let peak_ratio = if per_sensor_capacity == 0 {
+                0.0
+            } else {
+                sample.peak_len as f64 / per_sensor_capacity as f64
+            };
+            let full = sample.current_len >= per_sensor_capacity && per_sensor_capacity > 0;
+            let near_full =
+                !full && per_sensor_capacity > 0 && current_ratio >= near_full_ratio;
+
+            if full {
+                any_full = true;
+                warnings.push(format!(
+                    "Sensor {} internal buffer is FULL ({}/{})",
+                    sensor_id, sample.current_len, per_sensor_capacity
+                ));
+            } else if near_full {
+                any_near_full = true;
+                warnings.push(format!(
+                    "Sensor {} internal buffer is near full ({}/{})",
+                    sensor_id, sample.current_len, per_sensor_capacity
+                ));
+            }
+
+            sensors.push(SensorBufferStatus {
+                sensor_id: sensor_id.clone(),
+                current_len: sample.current_len,
+                capacity: per_sensor_capacity,
+                peak_len: sample.peak_len,
+                utilization_ratio: current_ratio,
+                peak_utilization_ratio: peak_ratio,
+                near_full,
+                full,
+            });
+        }
+
+        sensors.sort_by(|a, b| a.sensor_id.cmp(&b.sensor_id));
+
+        BufferTelemetrySnapshot {
+            sensors,
+            any_near_full,
+            any_full,
+            warnings,
         }
     }
 
