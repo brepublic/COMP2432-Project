@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
+use std::io::Write;
+use std::net::TcpStream;
 use serde::Deserialize;
 
 use sensor_sim::{
@@ -93,6 +95,19 @@ fn load_gateway_config() -> GatewayConfig {
     }
 }
 
+fn request_dashboard_shutdown(addr: &str) {
+    let Ok(mut stream) = TcpStream::connect(addr) else {
+        eprintln!("Warning: failed to connect dashboard at {addr} for shutdown.");
+        return;
+    };
+    let request = format!(
+        "POST /api/shutdown HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    if let Err(e) = stream.write_all(request.as_bytes()) {
+        eprintln!("Warning: failed to send dashboard shutdown request: {e}");
+    }
+}
+
 fn main() {
     // Create an atomic boolean as a global stop flag
     let running = Arc::new(AtomicBool::new(true));
@@ -165,6 +180,7 @@ fn main() {
     // 6. Start the Web server thread (dashboard)
     let dashboard_addr =
         std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string());
+    let dashboard_addr_for_shutdown = dashboard_addr.clone();
 
     let dashboard_handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
@@ -233,8 +249,10 @@ fn main() {
     engine.shutdown();
 
     println!("Stopping Web server...");
-    // The dashboard does not currently provide a graceful shutdown API.
-    // For now, we do not wait for it (the process is expected to exit).
+    request_dashboard_shutdown(&dashboard_addr_for_shutdown);
+    if let Err(e) = dashboard_handle.join() {
+        eprintln!("Warning: dashboard thread join failed: {:?}", e);
+    }
 
     println!("All threads stopped, exiting program.");
 }

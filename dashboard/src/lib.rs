@@ -2,9 +2,12 @@ use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
+use std::time::Duration;
 
 use salvo::prelude::*;
+use salvo::server::ServerHandle;
 use serde::Serialize;
 
 use common_models::{AggregatedFrame, Anomaly, BufferTelemetrySnapshot, SensorStats};
@@ -13,6 +16,8 @@ mod resource;
 const DATA_DIR: &str = "./data";
 const MAX_LATEST_FRAMES: usize = 10;
 static BUFFER_TELEMETRY: OnceLock<RwLock<Option<BufferTelemetrySnapshot>>> = OnceLock::new();
+static SERVER_HANDLE: OnceLock<ServerHandle> = OnceLock::new();
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
     BUFFER_TELEMETRY.get_or_init(|| RwLock::new(None))
@@ -21,6 +26,16 @@ fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
 pub fn set_buffer_telemetry(snapshot: BufferTelemetrySnapshot) {
     if let Ok(mut guard) = buffer_store().write() {
         *guard = Some(snapshot);
+    }
+}
+
+pub fn request_shutdown() {
+    // Ensure shutdown path only runs once.
+    if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(handle) = SERVER_HANDLE.get() {
+        handle.stop_graceful(Some(Duration::from_secs(2)));
     }
 }
 
@@ -121,6 +136,12 @@ async fn sensor_page(req: &mut Request) -> Text<String> {
 #[handler]
 async fn sensor_index_page() -> Text<String> {
     let html = load_template("sensor_index.html").await;
+    Text::Html(html)
+}
+
+#[handler]
+async fn shutdown_page() -> Text<String> {
+    let html = load_template("shutdown.html").await;
     Text::Html(html)
 }
 
@@ -238,6 +259,21 @@ async fn buffer_api() -> Json<BufferTelemetrySnapshot> {
     Json(snapshot)
 }
 
+#[derive(Debug, Serialize)]
+struct ShutdownResponse {
+    ok: bool,
+    message: String,
+}
+
+#[handler]
+async fn shutdown_api() -> Json<ShutdownResponse> {
+    request_shutdown();
+    Json(ShutdownResponse {
+        ok: true,
+        message: "Dashboard is shutting down. Program has stopped.".to_string(),
+    })
+}
+
 pub async fn run(addr: &'static str) {
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
@@ -256,9 +292,12 @@ pub async fn run(addr: &'static str) {
         .get(root)
         .push(Router::with_path("latest").get(latest_page))
         .push(Router::with_path("stats").get(stats_page))
+        .push(Router::with_path("shutdown").get(shutdown_page))
         .push(sensor_router)
-        .push(api_router);
+        .push(api_router.push(Router::with_path("shutdown").post(shutdown_api)));
 
     let listener = TcpListener::new(addr).bind().await;
-    Server::new(listener).serve(router).await;
+    let server = Server::new(listener);
+    let _ = SERVER_HANDLE.set(server.handle());
+    server.serve(router).await;
 }

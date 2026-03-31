@@ -1,6 +1,5 @@
-# COMP2432 - ProjA (Rust Sensor Pipeline + Dashboard)  
+# ProjA (Rust Sensor Pipeline + Dashboard)
 
-Semester project of COMP2432 Operating Systems, the Hong Kong Polytechnic University.  
 This project simulates sensor streams, aggregates them in the backend, persists aggregated frames to `./data`, and serves a live dashboard.
 
 ## Quick Start

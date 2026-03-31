@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Dashboard Shutdown</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #f1f5f9, #e2e8f0);
+            color: #0f172a;
+        }
+        .panel {
+            width: min(560px, 92vw);
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 14px;
+            padding: 28px;
+            box-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+        }
+        h1 { margin-top: 0; margin-bottom: 10px; }
+        p { line-height: 1.5; }
+        .btn {
+            margin-top: 10px;
+            border: 0;
+            border-radius: 10px;
+            padding: 10px 14px;
+            background: #dc2626;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 14px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+        }
+    </style>
+</head>
+<body>
+    <main class="panel">
+        <h1>Stop Program</h1>
+        <p>Click the button below to gracefully stop the dashboard service and notify the gateway to exit cleanly.</p>
+        <button id="shutdown-btn" class="btn">Shutdown Now</button>
+        <div id="status" class="status">Waiting for shutdown request...</div>
+    </main>
+
+    <script>
+        const btn = document.getElementById("shutdown-btn");
+        const status = document.getElementById("status");
+
+        async function triggerShutdown() {
+            btn.disabled = true;
+            status.textContent = "Sending shutdown request...";
+            try {
+                const resp = await fetch("/api/shutdown", { method: "POST", keepalive: true });
+                if (!resp.ok) {
+                    throw new Error("HTTP " + resp.status);
+                }
+                const data = await resp.json();
+                status.textContent = data.message || "Program has stopped. You can close this page now.";
+            } catch (e) {
+                status.textContent = "Shutdown request sent. If the service is already stopping, this is expected.";
+            } finally {
+                window.stop();
+                status.textContent = "Program has stopped. You can close this page now.";
+            }
+        }
+
+        btn.addEventListener("click", triggerShutdown);
+    </script>
+</body>
+</html>

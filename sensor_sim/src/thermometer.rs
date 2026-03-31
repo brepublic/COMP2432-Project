@@ -2,12 +2,15 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        Condvar, Mutex,
     },
     thread::JoinHandle,
 };
 
 use super::traits::Sensor;
 use os_lib::queue::*;
+use std::sync::atomic::{AtomicU64};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoReading {
@@ -24,6 +27,9 @@ pub struct Thermometer {
     writer: Option<QueueWriter<ThermoReading>>,
     running: Arc<AtomicBool>,
     handle: Option<JoinHandle<QueueWriter<ThermoReading>>>,
+    notify_seq: Arc<AtomicU64>,
+    notify_mu: Arc<Mutex<()>>,
+    notify_cv: Arc<Condvar>,
 }
 
 impl Thermometer {
@@ -38,6 +44,8 @@ impl Thermometer {
         let mut writer = self.writer.take().expect("start called twice");
         let rate_per_sec = self.rate_per_sec;
         let running = Arc::clone(&self.running);
+        let notify_seq = Arc::clone(&self.notify_seq);
+        let notify_cv = Arc::clone(&self.notify_cv);
 
         // Implementation for starting data generation thread
         self.handle = Some(std::thread::spawn(move || {
@@ -51,6 +59,8 @@ impl Thermometer {
                 unsafe {
                     writer.write(reading);
                 }
+                notify_seq.fetch_add(1, Ordering::Release);
+                notify_cv.notify_all();
 
                 // Sleep according to rate_per_sec
                 std::thread::sleep(std::time::Duration::from_millis(1000 / rate_per_sec as u64));
@@ -87,6 +97,9 @@ impl Sensor for Thermometer {
             writer: Some(writer),
             running: Arc::new(AtomicBool::new(true)),
             handle: None,
+            notify_seq: Arc::new(AtomicU64::new(0)),
+            notify_mu: Arc::new(Mutex::new(())),
+            notify_cv: Arc::new(Condvar::new()),
         }
     }
 
@@ -115,6 +128,21 @@ impl Sensor for Thermometer {
     /// Stop data generation
     fn stop(&mut self) {
         Thermometer::stop(self);
+    }
+
+    fn wait_for_data(&self, timeout: Duration) -> bool {
+        if self.available() > 0 {
+            return true;
+        }
+        let last = self.notify_seq.load(Ordering::Acquire);
+        let guard = self.notify_mu.lock().unwrap();
+        let _ = self
+            .notify_cv
+            .wait_timeout_while(guard, timeout, |_| {
+                self.notify_seq.load(Ordering::Acquire) == last && self.available() == 0
+            })
+            .unwrap();
+        self.available() > 0
     }
 }
 

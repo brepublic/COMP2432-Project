@@ -15,9 +15,9 @@ use common_models::{BufferTelemetrySnapshot, SensorBufferStatus};
 /// Unified sensor reading enum, including the sensor ID.
 #[derive(Debug, Clone)]
 pub enum SensorReading {
-    Accel(AccelReading, String, u64),
-    Force(ForceReading, String, u64),
-    Thermo(ThermoReading, String, u64),
+    Accel(AccelReading, Arc<str>, u64),
+    Force(ForceReading, Arc<str>, u64),
+    Thermo(ThermoReading, Arc<str>, u64),
 }
 
 impl SensorReading {
@@ -216,19 +216,20 @@ impl SensorBufferManager {
     where
         S: sensor_sim::traits::Sensor + Send + 'static,
         S::SensorReading: Send + 'static,
-        Wrap: Fn(S::SensorReading, String, u64) -> SensorReading + Send + Sync + 'static,
+        Wrap: Fn(S::SensorReading, Arc<str>, u64) -> SensorReading + Send + Sync + 'static,
     {
         // Start generating data (spawns sensor internal thread).
         sensor.start();
 
-        let sensor_id = sensor.id();
+        let sensor_id_key = sensor.id();
+        let sensor_id: Arc<str> = Arc::from(sensor_id_key.as_str());
         let running = self.running.clone();
         let shared = self.shared.clone();
         let per_sensor = Arc::clone(&self.per_sensor);
 
         {
             let mut guard = self.per_sensor.lock().unwrap();
-            guard.entry(sensor_id.clone()).or_insert(SensorQueueSnapshot {
+            guard.entry(sensor_id_key.clone()).or_insert(SensorQueueSnapshot {
                 current_len: 0,
                 peak_len: 0,
             });
@@ -239,10 +240,16 @@ impl SensorBufferManager {
                 let available = sensor.available();
                 {
                     let mut guard = per_sensor.lock().unwrap();
-                    let entry = guard.entry(sensor_id.clone()).or_insert(SensorQueueSnapshot {
-                        current_len: 0,
-                        peak_len: 0,
-                    });
+                    if !guard.contains_key(sensor_id_key.as_str()) {
+                        guard.insert(
+                            sensor_id_key.clone(),
+                            SensorQueueSnapshot {
+                                current_len: 0,
+                                peak_len: 0,
+                            },
+                        );
+                    }
+                    let entry = guard.get_mut(sensor_id_key.as_str()).unwrap();
                     entry.current_len = available;
                     if available > entry.peak_len {
                         entry.peak_len = available;
@@ -250,7 +257,8 @@ impl SensorBufferManager {
                 }
 
                 if available == 0 {
-                    thread::sleep(Duration::from_micros(100));
+                    // Block until new data arrives (or time out to re-check `running`).
+                    let _ = sensor.wait_for_data(Duration::from_millis(50));
                     continue;
                 }
 
@@ -260,7 +268,7 @@ impl SensorBufferManager {
                 while running.load(Ordering::SeqCst) && drained < available {
                     if let Some(reading) = sensor.read() {
                         let ts = now_millis();
-                        shared.push(wrap(reading, sensor_id.clone(), ts));
+                        shared.push(wrap(reading, Arc::clone(&sensor_id), ts));
                         drained += 1;
                     } else {
                         break;

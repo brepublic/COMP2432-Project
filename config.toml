@@ -1,11 +1,11 @@
 [sensors]
-thermo_1_rate_per_sec = 5000
-thermo_2_rate_per_sec = 300
+thermo_1_rate_per_sec = 50
+thermo_2_rate_per_sec = 30
 accel_1_rate_per_sec = 50
 accel_2_rate_per_sec = 50
 force_1_rate_per_sec = 50
 
 [buffer]
 # SharedBuffer capacity (number of readings).
-capacity = 5000000
+capacity = 5000
 

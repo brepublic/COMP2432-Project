@@ -1,5 +1,7 @@
-pub trait Sensor { 
-    type SensorReading; 
+use std::time::{Duration, Instant};
+
+pub trait Sensor {
+    type SensorReading;
 
     /// Create a new mock sensor with ID and generation rate 
     fn new(id: String , rate_per_sec : u32) -> Self; 
@@ -20,4 +22,21 @@ pub trait Sensor {
 
     /// Stop data generation
     fn stop(&mut self);
+
+    /// Wait until the sensor has at least one unread item, or timeout elapses.
+    ///
+    /// Default implementation uses a low-frequency poll to avoid burning CPU.
+    /// Sensor implementations may override this with a blocking wait.
+    fn wait_for_data(&self, timeout: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            if self.available() > 0 {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 } 
