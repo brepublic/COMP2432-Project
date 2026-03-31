@@ -12,6 +12,7 @@
         table { width: 100%; border-collapse: collapse; margin-top: 8px; }
         th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
         .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fee2e2; color: #991b1b; font-size: 12px; }
+        .sensor-anomaly { color: #991b1b; font-weight: 700; }
         a { color: #0969da; }
     </style>
 </head>
@@ -39,10 +40,12 @@
 
         function renderFrame(frame) {
             const sensors = Object.keys(frame.sensor_stats || {}).sort(compareSensorIds);
+            const anomalySensors = new Set((frame.anomalies || []).map((a) => a.sensor_id));
             const rows = sensors.map((id) => {
                 const s = frame.sensor_stats[id];
+                const sensorClass = anomalySensors.has(id) ? "sensor-anomaly" : "";
                 return `<tr>
-                    <td>${id}</td>
+                    <td class="${sensorClass}">${id}</td>
                     <td>${s.count}</td>
                     <td>${s.avg.toFixed(3)}</td>
                     <td>${s.min.toFixed(3)}</td>

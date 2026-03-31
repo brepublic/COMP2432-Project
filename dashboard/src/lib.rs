@@ -20,6 +20,7 @@ static BUFFER_TELEMETRY: OnceLock<RwLock<Option<BufferTelemetrySnapshot>>> = Onc
 static SERVER_HANDLE: OnceLock<ServerHandle> = OnceLock::new();
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_NOTIFY: OnceLock<Notify> = OnceLock::new();
+static RUN_START_MILLIS: OnceLock<u64> = OnceLock::new();
 
 fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
     BUFFER_TELEMETRY.get_or_init(|| RwLock::new(None))
@@ -27,6 +28,14 @@ fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
 
 fn shutdown_notify() -> &'static Notify {
     SHUTDOWN_NOTIFY.get_or_init(Notify::new)
+}
+
+fn now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 pub fn set_buffer_telemetry(snapshot: BufferTelemetrySnapshot) {
@@ -69,6 +78,15 @@ struct SensorLiveView {
     anomalies: Vec<Anomaly>,
 }
 
+fn newest_frames(mut frames: Vec<AggregatedFrame>) -> Vec<AggregatedFrame> {
+    frames.sort_by(|a, b| {
+        b.window_end
+            .cmp(&a.window_end)
+            .then_with(|| b.frame_id.cmp(&a.frame_id))
+    });
+    frames.into_iter().take(MAX_LATEST_FRAMES).collect()
+}
+
 fn load_all_frames() -> Vec<AggregatedFrame> {
     let base = PathBuf::from(DATA_DIR);
     let entries = match std::fs::read_dir(&base) {
@@ -95,7 +113,14 @@ fn load_all_frames() -> Vec<AggregatedFrame> {
         }
     }
 
-    frames
+    if let Some(run_start) = RUN_START_MILLIS.get() {
+        frames
+            .into_iter()
+            .filter(|frame| frame.window_end >= *run_start)
+            .collect()
+    } else {
+        frames
+    }
 }
 
 async fn load_all_frames_on_pool() -> Vec<AggregatedFrame> {
@@ -218,13 +243,8 @@ async fn shutdown_page() -> Text<String> {
 
 #[handler]
 async fn latest_api() -> Json<Vec<AggregatedFrame>> {
-    let mut frames = load_all_frames_on_pool().await;
-    frames.sort_by(|a, b| {
-        b.window_end
-            .cmp(&a.window_end)
-            .then_with(|| b.frame_id.cmp(&a.frame_id))
-    });
-    Json(frames.into_iter().take(MAX_LATEST_FRAMES).collect())
+    let frames = load_all_frames_on_pool().await;
+    Json(newest_frames(frames))
 }
 
 #[handler]
@@ -272,9 +292,9 @@ async fn sensor_api(req: &mut Request) -> Json<SensorLiveView> {
 
     if let Some(frame) = selected {
         let stats = frame.sensor_stats.get(&sensor_id).cloned();
-        let anomalies = frame
-            .anomalies
+        let anomalies = frames
             .iter()
+            .flat_map(|f| f.anomalies.iter())
             .filter(|a| a.sensor_id == sensor_id)
             .cloned()
             .collect();
@@ -363,6 +383,7 @@ async fn shutdown_watch_api() -> Json<ShutdownWatchResponse> {
 }
 
 pub async fn run(addr: &'static str) {
+    let _ = RUN_START_MILLIS.set(now_millis());
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
         .push(Router::with_path("stats").get(stats_api))
