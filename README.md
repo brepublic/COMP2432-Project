@@ -24,18 +24,21 @@ Example `config.toml`:
 
 ```toml
 [sensors]
-thermo_1_rate_per_sec = 50
-thermo_2_rate_per_sec = 50
-accel_1_rate_per_sec = 100
-accel_2_rate_per_sec = 100
-force_1_rate_per_sec = 75
+thermo_count = 2
+thermo_rates_per_sec = "50 50"
+accel_count = 2
+accel_rates_per_sec = "100 100"
+force_count = 1
+force_rates_per_sec = "75"
 
 [buffer]
 capacity = 5000
 ```
 
 Notes:
-- `*_rate_per_sec` controls the simulated generation rate per sensor (events per second).
+- `*_count` controls how many sensors of each type are created.
+- `*_rates_per_sec` uses a whitespace-separated list (in a TOML string), for example `"50 60 70"`.
+- When `*_count` is larger than the number of rates provided, the last rate is reused for remaining sensors.
 - `buffer.capacity` controls the bounded in-memory queue capacity used between sensor readers and the aggregation workers.
 
 ## Environment Variables (debug / feature switches)

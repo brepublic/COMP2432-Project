@@ -5,8 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::path::PathBuf;
-use std::io::Write;
-use std::net::TcpStream;
 use serde::Deserialize;
 
 use sensor_sim::{
@@ -43,11 +41,12 @@ struct GatewayConfig {
 
 #[derive(Debug, Deserialize)]
 struct SensorsConfig {
-    thermo_1_rate_per_sec: u32,
-    thermo_2_rate_per_sec: u32,
-    accel_1_rate_per_sec: u32,
-    accel_2_rate_per_sec: u32,
-    force_1_rate_per_sec: u32,
+    thermo_count: usize,
+    thermo_rates_per_sec: String,
+    accel_count: usize,
+    accel_rates_per_sec: String,
+    force_count: usize,
+    force_rates_per_sec: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,11 +58,12 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             sensors: SensorsConfig {
-                thermo_1_rate_per_sec: 50,
-                thermo_2_rate_per_sec: 50,
-                accel_1_rate_per_sec: 100,
-                accel_2_rate_per_sec: 100,
-                force_1_rate_per_sec: 75,
+                thermo_count: 2,
+                thermo_rates_per_sec: "50 50".to_string(),
+                accel_count: 2,
+                accel_rates_per_sec: "100 100".to_string(),
+                force_count: 1,
+                force_rates_per_sec: "75".to_string(),
             },
             buffer: BufferConfig { capacity: 5000 },
         }
@@ -95,16 +95,24 @@ fn load_gateway_config() -> GatewayConfig {
     }
 }
 
-fn request_dashboard_shutdown(addr: &str) {
-    let Ok(mut stream) = TcpStream::connect(addr) else {
-        eprintln!("Warning: failed to connect dashboard at {addr} for shutdown.");
-        return;
-    };
-    let request = format!(
-        "POST /api/shutdown HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    );
-    if let Err(e) = stream.write_all(request.as_bytes()) {
-        eprintln!("Warning: failed to send dashboard shutdown request: {e}");
+fn parse_rates(spec: &str, default_rate: u32) -> Vec<u32> {
+    let parsed: Vec<u32> = spec
+        .split_whitespace()
+        .filter_map(|token| token.parse::<u32>().ok())
+        .filter(|rate| *rate > 0)
+        .collect();
+    if parsed.is_empty() {
+        vec![default_rate]
+    } else {
+        parsed
+    }
+}
+
+fn rate_for_index(rates: &[u32], idx: usize) -> u32 {
+    if let Some(rate) = rates.get(idx) {
+        *rate
+    } else {
+        *rates.last().unwrap_or(&1)
     }
 }
 
@@ -135,44 +143,61 @@ fn main() {
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "True"))
         .unwrap_or(false);
 
-    // 2. Create and start sensors
-    let mut thermo_1 =
-        Thermometer::new("thermo-1".to_string(), cfg.sensors.thermo_1_rate_per_sec);
-    let mut thermo_2 =
-        Thermometer::new("thermo-2".to_string(), cfg.sensors.thermo_2_rate_per_sec);
-    let mut accel_1 =
-        Accelerometer::new("accel-1".to_string(), cfg.sensors.accel_1_rate_per_sec);
-    let mut accel_2 =
-        Accelerometer::new("accel-2".to_string(), cfg.sensors.accel_2_rate_per_sec);
-    let mut force_1 =
-        ForceSensor::new("force-1".to_string(), cfg.sensors.force_1_rate_per_sec);
+    // 2. Create and start sensors dynamically from config.
+    let thermo_rates = parse_rates(&cfg.sensors.thermo_rates_per_sec, 50);
+    let accel_rates = parse_rates(&cfg.sensors.accel_rates_per_sec, 100);
+    let force_rates = parse_rates(&cfg.sensors.force_rates_per_sec, 75);
 
     // 3. Register sensors (spawns one reader thread per sensor).
-    buffer_manager.register_sensor(thermo_1, |reading, id, ts| {
-        SensorReading::Thermo(reading, id, ts)
-    });
-    buffer_manager.register_sensor(thermo_2, |reading, id, ts| {
-        SensorReading::Thermo(reading, id, ts)
-    });
-    buffer_manager.register_sensor(accel_1, |reading, id, ts| {
-        SensorReading::Accel(reading, id, ts)
-    });
-    buffer_manager.register_sensor(accel_2, |reading, id, ts| {
-        SensorReading::Accel(reading, id, ts)
-    });
-    buffer_manager.register_sensor(force_1, |reading, id, ts| {
-        SensorReading::Force(reading, id, ts)
-    });
+    for i in 0..cfg.sensors.thermo_count {
+        let sensor_id = format!("thermo-{}", i + 1);
+        let rate = rate_for_index(&thermo_rates, i);
+        let sensor = Thermometer::new(sensor_id, rate);
+        buffer_manager.register_sensor(sensor, |reading, id, ts| {
+            SensorReading::Thermo(reading, id, ts)
+        });
+    }
+    for i in 0..cfg.sensors.accel_count {
+        let sensor_id = format!("accel-{}", i + 1);
+        let rate = rate_for_index(&accel_rates, i);
+        let sensor = Accelerometer::new(sensor_id, rate);
+        buffer_manager.register_sensor(sensor, |reading, id, ts| {
+            SensorReading::Accel(reading, id, ts)
+        });
+    }
+    for i in 0..cfg.sensors.force_count {
+        let sensor_id = format!("force-{}", i + 1);
+        let rate = rate_for_index(&force_rates, i);
+        let sensor = ForceSensor::new(sensor_id, rate);
+        buffer_manager.register_sensor(sensor, |reading, id, ts| {
+            SensorReading::Force(reading, id, ts)
+        });
+    }
+
+    let total_sensors = cfg.sensors.thermo_count + cfg.sensors.accel_count + cfg.sensors.force_count;
 
     // 4. Create data storage (data files saved to ./data)
     let storage = Arc::new(DataStorage::new(PathBuf::from("./data")));
 
-    // 5. Create aggregation engine (4 workers, 1s window, anomaly threshold 3.0)
+    // 5. Create aggregation engine with a bounded worker pool sized by load and CPU.
+    let cpu_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let aggregation_workers = total_sensors.clamp(1, cpu_workers.max(1));
+    println!(
+        "Configured sensors: thermo={}, accel={}, force={} (total={}), aggregation_workers={}",
+        cfg.sensors.thermo_count,
+        cfg.sensors.accel_count,
+        cfg.sensors.force_count,
+        total_sensors,
+        aggregation_workers
+    );
+
     let mut engine = AggregationEngine::new(
         buffer_manager.shared(),
         storage.clone(),
         Duration::from_secs(1),
-        4,
+        aggregation_workers,
         3.0,
     );
     engine.start(); // Start aggregation worker threads
@@ -180,7 +205,6 @@ fn main() {
     // 6. Start the Web server thread (dashboard)
     let dashboard_addr =
         std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string());
-    let dashboard_addr_for_shutdown = dashboard_addr.clone();
 
     let dashboard_handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
@@ -249,7 +273,7 @@ fn main() {
     engine.shutdown();
 
     println!("Stopping Web server...");
-    request_dashboard_shutdown(&dashboard_addr_for_shutdown);
+    dashboard::request_shutdown();
     if let Err(e) = dashboard_handle.join() {
         eprintln!("Warning: dashboard thread join failed: {:?}", e);
     }

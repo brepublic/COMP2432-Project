@@ -9,6 +9,7 @@ use std::time::Duration;
 use salvo::prelude::*;
 use salvo::server::ServerHandle;
 use serde::Serialize;
+use tokio::sync::Notify;
 
 use common_models::{AggregatedFrame, Anomaly, BufferTelemetrySnapshot, SensorStats};
 mod resource;
@@ -18,9 +19,14 @@ const MAX_LATEST_FRAMES: usize = 10;
 static BUFFER_TELEMETRY: OnceLock<RwLock<Option<BufferTelemetrySnapshot>>> = OnceLock::new();
 static SERVER_HANDLE: OnceLock<ServerHandle> = OnceLock::new();
 static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static SHUTDOWN_NOTIFY: OnceLock<Notify> = OnceLock::new();
 
 fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
     BUFFER_TELEMETRY.get_or_init(|| RwLock::new(None))
+}
+
+fn shutdown_notify() -> &'static Notify {
+    SHUTDOWN_NOTIFY.get_or_init(Notify::new)
 }
 
 pub fn set_buffer_telemetry(snapshot: BufferTelemetrySnapshot) {
@@ -34,8 +40,14 @@ pub fn request_shutdown() {
     if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Wake browser clients first so they can show a prompt before process exits.
+    shutdown_notify().notify_waiters();
     if let Some(handle) = SERVER_HANDLE.get() {
-        handle.stop_graceful(Some(Duration::from_secs(2)));
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(600));
+            handle.stop_graceful(Some(Duration::from_secs(2)));
+        });
     }
 }
 
@@ -101,11 +113,70 @@ fn load_template_sync(name: &str) -> String {
     }
 }
 
+fn inject_shutdown_watcher(mut html: String) -> String {
+    let script = r#"
+<script>
+(() => {
+    const bannerId = "dashboard-shutdown-banner";
+    let announced = false;
+
+    function showShutdownNotice(message) {
+        if (announced) return;
+        announced = true;
+        const text = message || "Dashboard is shutting down. Program has stopped.";
+        alert(text);
+
+        if (!document.getElementById(bannerId)) {
+            const banner = document.createElement("div");
+            banner.id = bannerId;
+            banner.textContent = text;
+            banner.style.cssText = [
+                "position:fixed",
+                "left:0",
+                "right:0",
+                "bottom:0",
+                "padding:12px 16px",
+                "background:#b91c1c",
+                "color:#fff",
+                "font-size:14px",
+                "font-weight:600",
+                "text-align:center",
+                "z-index:2147483647",
+                "box-shadow:0 -6px 20px rgba(0,0,0,0.25)"
+            ].join(";");
+            document.body.appendChild(banner);
+        }
+    }
+
+    fetch("/api/shutdown/watch", { cache: "no-store" })
+        .then((resp) => (resp.ok ? resp.json() : Promise.reject(new Error("HTTP " + resp.status))))
+        .then((data) => {
+            if (data && data.shutting_down) {
+                showShutdownNotice(data.message);
+            }
+        })
+        .catch(() => {
+            // Ignore network errors (tab closed/manual refresh/etc.).
+        });
+})();
+</script>
+"#;
+
+    if let Some(pos) = html.rfind("</body>") {
+        html.insert_str(pos, script);
+        html
+    } else {
+        html.push_str(script);
+        html
+    }
+}
+
 async fn load_template(name: &'static str) -> String {
     // Template reading is blocking IO; keep it off async executor threads.
-    tokio::task::spawn_blocking(move || load_template_sync(name))
+    let html = tokio::task::spawn_blocking(move || load_template_sync(name))
         .await
-        .unwrap_or_else(|_| format!("<!-- Failed to load template: {name} -->"))
+        .unwrap_or_else(|_| format!("<!-- Failed to load template: {name} -->"));
+    inject_shutdown_watcher(html)
 }
 
 #[handler]
@@ -265,11 +336,28 @@ struct ShutdownResponse {
     message: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ShutdownWatchResponse {
+    shutting_down: bool,
+    message: String,
+}
+
 #[handler]
 async fn shutdown_api() -> Json<ShutdownResponse> {
     request_shutdown();
     Json(ShutdownResponse {
         ok: true,
+        message: "Dashboard is shutting down. Program has stopped.".to_string(),
+    })
+}
+
+#[handler]
+async fn shutdown_watch_api() -> Json<ShutdownWatchResponse> {
+    if !SHUTTING_DOWN.load(Ordering::SeqCst) {
+        shutdown_notify().notified().await;
+    }
+    Json(ShutdownWatchResponse {
+        shutting_down: true,
         message: "Dashboard is shutting down. Program has stopped.".to_string(),
     })
 }
@@ -294,10 +382,21 @@ pub async fn run(addr: &'static str) {
         .push(Router::with_path("stats").get(stats_page))
         .push(Router::with_path("shutdown").get(shutdown_page))
         .push(sensor_router)
-        .push(api_router.push(Router::with_path("shutdown").post(shutdown_api)));
+        .push(
+            api_router
+                .push(Router::with_path("shutdown").post(shutdown_api))
+                .push(Router::with_path("shutdown/watch").get(shutdown_watch_api)),
+        );
 
     let listener = TcpListener::new(addr).bind().await;
     let server = Server::new(listener);
     let _ = SERVER_HANDLE.set(server.handle());
+    // If shutdown was requested before server handle initialization,
+    // stop immediately after handle is installed.
+    if SHUTTING_DOWN.load(Ordering::SeqCst) {
+        if let Some(handle) = SERVER_HANDLE.get() {
+            handle.stop_graceful(Some(Duration::from_secs(2)));
+        }
+    }
     server.serve(router).await;
 }

@@ -23,8 +23,22 @@
     <div class="meta">Auto refresh: every 1 second</div>
     <div id="container"></div>
     <script>
+        function parseSensorId(sensorId) {
+            const match = sensorId.match(/^(.*?)-(\d+)$/);
+            if (!match) {
+                return { type: sensorId, index: Number.POSITIVE_INFINITY };
+            }
+            return { type: match[1], index: Number.parseInt(match[2], 10) };
+        }
+
+        function compareSensorIds(left, right) {
+            const l = parseSensorId(left);
+            const r = parseSensorId(right);
+            return l.type.localeCompare(r.type) || l.index - r.index || left.localeCompare(right);
+        }
+
         function renderFrame(frame) {
-            const sensors = Object.keys(frame.sensor_stats || {});
+            const sensors = Object.keys(frame.sensor_stats || {}).sort(compareSensorIds);
             const rows = sensors.map((id) => {
                 const s = frame.sensor_stats[id];
                 return `<tr>
