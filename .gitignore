@@ -1,4 +1,2 @@
-target/
-data/
-.ai/
-.idea/
+./data
+./target
