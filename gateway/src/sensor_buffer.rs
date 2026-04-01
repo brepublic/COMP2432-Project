@@ -13,27 +13,36 @@ use sensor_sim::thermometer::ThermoReading;
 use common_models::{BufferTelemetrySnapshot, SensorBufferStatus};
 
 /// Unified sensor reading enum, including the sensor ID.
+/// `internal_buffer_len` is the sensor queue depth immediately before this `read()`.
 #[derive(Debug, Clone)]
 pub enum SensorReading {
-    Accel(AccelReading, Arc<str>, u64),
-    Force(ForceReading, Arc<str>, u64),
-    Thermo(ThermoReading, Arc<str>, u64),
+    Accel(AccelReading, Arc<str>, u64, usize),
+    Force(ForceReading, Arc<str>, u64, usize),
+    Thermo(ThermoReading, Arc<str>, u64, usize),
 }
 
 impl SensorReading {
     pub fn sensor_id(&self) -> &str {
         match self {
-            SensorReading::Accel(_, id, _) => id,
-            SensorReading::Force(_, id, _) => id,
-            SensorReading::Thermo(_, id, _) => id,
+            SensorReading::Accel(_, id, _, _) => id,
+            SensorReading::Force(_, id, _, _) => id,
+            SensorReading::Thermo(_, id, _, _) => id,
         }
     }
 
     pub fn timestamp_millis(&self) -> u64 {
         match self {
-            SensorReading::Accel(_, _, ts) => *ts,
-            SensorReading::Force(_, _, ts) => *ts,
-            SensorReading::Thermo(_, _, ts) => *ts,
+            SensorReading::Accel(_, _, ts, _) => *ts,
+            SensorReading::Force(_, _, ts, _) => *ts,
+            SensorReading::Thermo(_, _, ts, _) => *ts,
+        }
+    }
+
+    pub fn internal_buffer_len(&self) -> usize {
+        match self {
+            SensorReading::Accel(_, _, _, n) => *n,
+            SensorReading::Force(_, _, _, n) => *n,
+            SensorReading::Thermo(_, _, _, n) => *n,
         }
     }
 }
@@ -177,12 +186,12 @@ impl SensorBufferManager {
 
     /// Register a sensor (spawns a reader thread).
     ///
-    /// `wrap` converts the sensor reading + id + timestamp into this project's `SensorReading`.
+    /// `wrap` converts the sensor reading + id + timestamp + internal buffer depth into `SensorReading`.
     pub fn register_sensor<S, Wrap>(&mut self, mut sensor: S, wrap: Wrap)
     where
         S: sensor_sim::traits::Sensor + Send + 'static,
         S::SensorReading: Send + 'static,
-        Wrap: Fn(S::SensorReading, Arc<str>, u64) -> SensorReading + Send + Sync + 'static,
+        Wrap: Fn(S::SensorReading, Arc<str>, u64, usize) -> SensorReading + Send + Sync + 'static,
     {
         // Start generating data (spawns sensor internal thread).
         sensor.start();
@@ -228,14 +237,20 @@ impl SensorBufferManager {
                     continue;
                 }
 
-                // Drain a burst of already-buffered sensor samples in one scheduling slice.
-                // This keeps up with high-rate producers and protects the tiny sensor queue.
-                let mut drained = 0usize;
-                while running.load(Ordering::SeqCst) && drained < available {
+                // Drain buffered samples; record internal queue depth before each read().
+                while running.load(Ordering::SeqCst) {
+                    let internal_len = sensor.available();
+                    if internal_len == 0 {
+                        break;
+                    }
                     if let Some(reading) = sensor.read() {
                         let ts = now_millis();
-                        shared.push(wrap(reading, Arc::clone(&sensor_id), ts));
-                        drained += 1;
+                        shared.push(wrap(
+                            reading,
+                            Arc::clone(&sensor_id),
+                            ts,
+                            internal_len,
+                        ));
                     } else {
                         break;
                     }

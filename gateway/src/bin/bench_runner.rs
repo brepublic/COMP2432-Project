@@ -1,5 +1,7 @@
 #[path = "../benchmark/mod.rs"]
 mod benchmark;
+#[path = "../rates.rs"]
+mod rates;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

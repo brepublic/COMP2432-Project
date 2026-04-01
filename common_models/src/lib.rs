@@ -27,6 +27,9 @@ pub struct AggregatedFrame {
     pub window_end: u64,
     pub sensor_stats: HashMap<String, SensorStats>,
     pub anomalies: Vec<Anomaly>,
+    /// Per-sensor max internal queue depth observed on any sample in this window.
+    #[serde(default)]
+    pub sensor_internal_buffer_max: HashMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,5 +50,16 @@ pub struct BufferTelemetrySnapshot {
     pub any_near_full: bool,
     pub any_full: bool,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThroughputTelemetrySnapshot {
+    pub buffer_len: usize,
+    pub buffer_capacity: usize,
+    pub pushed_total: u64,
+    pub popped_total: u64,
+    pub pushed_per_sec: u64,
+    pub popped_per_sec: u64,
+    pub full_waits_total: u64,
 }
 

@@ -15,6 +15,7 @@ use sensor_sim::{
 };
 
 // Import custom modules
+mod rates;
 mod sensor_buffer;
 mod aggregation;
 mod storage;
@@ -22,16 +23,29 @@ mod storage;
 use sensor_buffer::{SensorBufferManager, SensorReading};
 use aggregation::AggregationEngine;
 use storage::DataStorage;
+use common_models::ThroughputTelemetrySnapshot;
 
 // Import the dashboard (Web server)
 
 // Sensor generation rates (events per second).
 const BUFFER_DEBUG_ENV: &str = "GATEWAY_DEBUG_BUFFER";
 const GATEWAY_CONFIG_ENV: &str = "GATEWAY_CONFIG";
-// sensor_sim uses a ring queue of size 128, but this queue design keeps one slot
-// empty to distinguish full vs empty, so usable capacity is 127.
-const SENSOR_INTERNAL_BUFFER_USABLE_CAPACITY: usize = 127;
-const SENSOR_NEAR_FULL_RATIO: f64 = 0.85;
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct SensorInternalBufferConfig {
+    usable_capacity: usize,
+    near_full_ratio: f64,
+}
+
+impl Default for SensorInternalBufferConfig {
+    fn default() -> Self {
+        Self {
+            // sensor_sim ring is 128 slots with one reserved empty slot => 127 usable.
+            usable_capacity: 127,
+            near_full_ratio: 0.85,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct GatewayConfig {
@@ -39,6 +53,8 @@ struct GatewayConfig {
     buffer: BufferConfig,
     #[serde(default)]
     dashboard: DashboardConfig,
+    #[serde(default)]
+    sensor_internal_buffer: SensorInternalBufferConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,7 +81,7 @@ struct DashboardConfig {
 impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
-            addr: "127.0.0.1:5800".to_string(),
+            addr: "0.0.0.0:5800".to_string(),
         }
     }
 }
@@ -83,6 +99,7 @@ impl Default for GatewayConfig {
             },
             buffer: BufferConfig { capacity: 5000 },
             dashboard: DashboardConfig::default(),
+            sensor_internal_buffer: SensorInternalBufferConfig::default(),
         }
     }
 }
@@ -109,27 +126,6 @@ fn load_gateway_config() -> GatewayConfig {
             );
             GatewayConfig::default()
         }
-    }
-}
-
-fn parse_rates(spec: &str, default_rate: u32) -> Vec<u32> {
-    let parsed: Vec<u32> = spec
-        .split_whitespace()
-        .filter_map(|token| token.parse::<u32>().ok())
-        .filter(|rate| *rate > 0)
-        .collect();
-    if parsed.is_empty() {
-        vec![default_rate]
-    } else {
-        parsed
-    }
-}
-
-fn rate_for_index(rates: &[u32], idx: usize) -> u32 {
-    if let Some(rate) = rates.get(idx) {
-        *rate
-    } else {
-        *rates.last().unwrap_or(&1)
     }
 }
 
@@ -161,33 +157,33 @@ fn main() {
         .unwrap_or(false);
 
     // 2. Create and start sensors dynamically from config.
-    let thermo_rates = parse_rates(&cfg.sensors.thermo_rates_per_sec, 50);
-    let accel_rates = parse_rates(&cfg.sensors.accel_rates_per_sec, 100);
-    let force_rates = parse_rates(&cfg.sensors.force_rates_per_sec, 75);
+    let thermo_rates = rates::parse_rates(&cfg.sensors.thermo_rates_per_sec, 50);
+    let accel_rates = rates::parse_rates(&cfg.sensors.accel_rates_per_sec, 100);
+    let force_rates = rates::parse_rates(&cfg.sensors.force_rates_per_sec, 75);
 
     // 3. Register sensors (spawns one reader thread per sensor).
     for i in 0..cfg.sensors.thermo_count {
         let sensor_id = format!("thermo-{}", i + 1);
-        let rate = rate_for_index(&thermo_rates, i);
+        let rate = rates::rate_for_index(&thermo_rates, i);
         let sensor = Thermometer::new(sensor_id, rate);
-        buffer_manager.register_sensor(sensor, |reading, id, ts| {
-            SensorReading::Thermo(reading, id, ts)
+        buffer_manager.register_sensor(sensor, |reading, id, ts, internal_len| {
+            SensorReading::Thermo(reading, id, ts, internal_len)
         });
     }
     for i in 0..cfg.sensors.accel_count {
         let sensor_id = format!("accel-{}", i + 1);
-        let rate = rate_for_index(&accel_rates, i);
+        let rate = rates::rate_for_index(&accel_rates, i);
         let sensor = Accelerometer::new(sensor_id, rate);
-        buffer_manager.register_sensor(sensor, |reading, id, ts| {
-            SensorReading::Accel(reading, id, ts)
+        buffer_manager.register_sensor(sensor, |reading, id, ts, internal_len| {
+            SensorReading::Accel(reading, id, ts, internal_len)
         });
     }
     for i in 0..cfg.sensors.force_count {
         let sensor_id = format!("force-{}", i + 1);
-        let rate = rate_for_index(&force_rates, i);
+        let rate = rates::rate_for_index(&force_rates, i);
         let sensor = ForceSensor::new(sensor_id, rate);
-        buffer_manager.register_sensor(sensor, |reading, id, ts| {
-            SensorReading::Force(reading, id, ts)
+        buffer_manager.register_sensor(sensor, |reading, id, ts, internal_len| {
+            SensorReading::Force(reading, id, ts, internal_len)
         });
     }
 
@@ -221,10 +217,15 @@ fn main() {
 
     // 6. Start the Web server thread (dashboard)
     let dashboard_addr = if cfg.dashboard.addr.trim().is_empty() {
-        std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string())
+        std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "0.0.0.0:5800".to_string())
     } else {
         cfg.dashboard.addr.clone()
     };
+
+    dashboard::set_internal_buffer_policy( cfg.sensor_internal_buffer.usable_capacity, 
+        cfg.sensor_internal_buffer.near_full_ratio,
+
+    );
 
     let dashboard_handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
@@ -237,10 +238,20 @@ fn main() {
     // 7. Main thread monitors running state and prints buffer usage every second (optional)
     while running.load(Ordering::SeqCst) {
         let sensor_buffers = buffer_manager.sensor_internal_buffers_snapshot(
-            SENSOR_INTERNAL_BUFFER_USABLE_CAPACITY,
-            SENSOR_NEAR_FULL_RATIO,
+            cfg.sensor_internal_buffer.usable_capacity,
+            cfg.sensor_internal_buffer.near_full_ratio,
         );
         dashboard::set_buffer_telemetry(sensor_buffers.clone());
+        let throughput_stats = buffer_manager.utilization_stats();
+        dashboard::set_throughput_telemetry(ThroughputTelemetrySnapshot {
+            buffer_len: throughput_stats.len,
+            buffer_capacity: throughput_stats.capacity,
+            pushed_total: throughput_stats.pushed_total,
+            popped_total: throughput_stats.popped_total,
+            pushed_per_sec: throughput_stats.pushed_per_sec,
+            popped_per_sec: throughput_stats.popped_per_sec,
+            full_waits_total: throughput_stats.full_waits_total,
+        });
 
         if sensor_buffers.any_full {
             println!("WARNING: at least one sensor internal buffer is FULL!");
@@ -255,7 +266,7 @@ fn main() {
         }
 
         if buffer_debug {
-            let s = buffer_manager.utilization_stats();
+            let s = throughput_stats.clone();
 
             println!(
                 "Buffer: len={}/{} ({:.1}%), pushed+{} /s, popped+{} /s",
@@ -266,7 +277,7 @@ fn main() {
                 s.popped_per_sec
             );
         } else {
-            let s = buffer_manager.utilization_stats();
+            let s = throughput_stats;
             let len = s.len;
             let cap = s.capacity;
             println!(

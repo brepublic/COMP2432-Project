@@ -22,6 +22,7 @@ impl DataStorage {
     /// We write to a temp file, call `sync_all()`, then atomically `rename()` to the final name.
     /// This guarantees the web server never reads partially written content.
     pub fn write(&self, frame: AggregatedFrame) {
+        let for_dashboard = frame.clone();
         let final_name = format!("frame_{}_{}.json", frame.window_end, frame.frame_id);
         let final_path = self.base_path.join(&final_name);
 
@@ -43,6 +44,8 @@ impl DataStorage {
 
         // Atomic on POSIX when src and dst are on the same filesystem.
         fs::rename(&tmp_path, &final_path).expect("Failed to atomically rename data file");
+
+        dashboard::record_aggregated_frame(for_dashboard);
     }
 
 }

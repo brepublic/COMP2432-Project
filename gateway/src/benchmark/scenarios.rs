@@ -1,4 +1,4 @@
-use crate::benchmark::{ScenarioConfig, SensorScenarioConfig, Thresholds, HttpLoadConfig};
+use crate::benchmark::{HttpLoadConfig, ScenarioConfig, SensorScenarioConfig, Thresholds};
 
 pub fn default_scenarios() -> Vec<ScenarioConfig> {
     vec![
@@ -20,6 +20,11 @@ pub fn default_scenarios() -> Vec<ScenarioConfig> {
             http_load: Some(HttpLoadConfig {
                 enabled: true,
                 endpoint: "/api/latest".to_string(),
+                endpoints: vec![
+                    "/api/latest".to_string(),
+                    "/api/stats".to_string(),
+                    "/api/sensor/thermo-1".to_string(),
+                ],
                 concurrency: 1,
                 timeout_ms: 1000,
             }),
@@ -43,6 +48,7 @@ pub fn default_scenarios() -> Vec<ScenarioConfig> {
             http_load: Some(HttpLoadConfig {
                 enabled: true,
                 endpoint: "/api/stats".to_string(),
+                endpoints: vec![],
                 concurrency: 10,
                 timeout_ms: 1000,
             }),
@@ -66,6 +72,7 @@ pub fn default_scenarios() -> Vec<ScenarioConfig> {
             http_load: Some(HttpLoadConfig {
                 enabled: true,
                 endpoint: "/api/latest".to_string(),
+                endpoints: vec![],
                 concurrency: 100,
                 timeout_ms: 1200,
             }),
@@ -89,8 +96,57 @@ pub fn default_scenarios() -> Vec<ScenarioConfig> {
             http_load: Some(HttpLoadConfig {
                 enabled: true,
                 endpoint: "/api/stats".to_string(),
+                endpoints: vec![],
                 concurrency: 20,
                 timeout_ms: 1000,
+            }),
+            thresholds: Thresholds::default(),
+        },
+        ScenarioConfig {
+            id: "scalability_18_sensors".to_string(),
+            description: "Scalability with 18 sensors at fixed rates".to_string(),
+            warmup_secs: 20,
+            measure_secs: 180,
+            cooldown_secs: 10,
+            buffer_capacity: 12000,
+            sensors: SensorScenarioConfig {
+                thermo_count: 6,
+                thermo_rates_per_sec: "45 45 45 45 45 45".to_string(),
+                accel_count: 6,
+                accel_rates_per_sec: "45 45 45 45 45 45".to_string(),
+                force_count: 6,
+                force_rates_per_sec: "45 45 45 45 45 45".to_string(),
+            },
+            http_load: Some(HttpLoadConfig {
+                enabled: true,
+                endpoint: "/api/stats".to_string(),
+                endpoints: vec![],
+                concurrency: 24,
+                timeout_ms: 1000,
+            }),
+            thresholds: Thresholds::default(),
+        },
+        ScenarioConfig {
+            id: "scalability_24_sensors".to_string(),
+            description: "Scalability with 24 sensors at fixed rates".to_string(),
+            warmup_secs: 25,
+            measure_secs: 180,
+            cooldown_secs: 10,
+            buffer_capacity: 16000,
+            sensors: SensorScenarioConfig {
+                thermo_count: 8,
+                thermo_rates_per_sec: "40 40 40 40 40 40 40 40".to_string(),
+                accel_count: 8,
+                accel_rates_per_sec: "40 40 40 40 40 40 40 40".to_string(),
+                force_count: 8,
+                force_rates_per_sec: "40 40 40 40 40 40 40 40".to_string(),
+            },
+            http_load: Some(HttpLoadConfig {
+                enabled: true,
+                endpoint: "/api/stats".to_string(),
+                endpoints: vec![],
+                concurrency: 32,
+                timeout_ms: 1200,
             }),
             thresholds: Thresholds::default(),
         },
@@ -112,6 +168,7 @@ pub fn default_scenarios() -> Vec<ScenarioConfig> {
             http_load: Some(HttpLoadConfig {
                 enabled: true,
                 endpoint: "/api/latest".to_string(),
+                endpoints: vec![],
                 concurrency: 200,
                 timeout_ms: 1500,
             }),

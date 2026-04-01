@@ -157,13 +157,13 @@ impl AggregationEngine {
 
         for r in readings {
             let value = match r {
-                SensorReading::Accel(v, _, _) => {
+                SensorReading::Accel(v, _, _, _) => {
                     (v.acceleration_x + v.acceleration_y + v.acceleration_z) / 3.0
                 }
-                SensorReading::Force(v, _, _) => {
+                SensorReading::Force(v, _, _, _) => {
                     (v.force_x + v.force_y + v.force_z) / 3.0
                 }
-                SensorReading::Thermo(v, _, _) => v.temperature_celsius,
+                SensorReading::Thermo(v, _, _, _) => v.temperature_celsius,
             };
             count += 1;
             if value < min {
@@ -204,13 +204,13 @@ impl AggregationEngine {
     ) {
         for r in readings {
             let value = match r {
-                SensorReading::Accel(v, _, _) => {
+                SensorReading::Accel(v, _, _, _) => {
                     (v.acceleration_x + v.acceleration_y + v.acceleration_z) / 3.0
                 }
-                SensorReading::Force(v, _, _) => {
+                SensorReading::Force(v, _, _, _) => {
                     (v.force_x + v.force_y + v.force_z) / 3.0
                 }
-                SensorReading::Thermo(v, _, _) => v.temperature_celsius,
+                SensorReading::Thermo(v, _, _, _) => v.temperature_celsius,
             };
 
             if stats.stddev > 0.0 && (value - stats.avg).abs() > threshold * stats.stddev {
@@ -242,9 +242,17 @@ fn make_frame(
     storage: &DataStorage,
 ) -> AggregatedFrame {
     let mut stats_map: HashMap<String, SensorStats> = HashMap::new();
+    let mut sensor_internal_buffer_max: HashMap<String, usize> = HashMap::new();
     let mut anomalies: Vec<Anomaly> = Vec::new();
 
     for (sensor_id, readings) in readings_by_sensor {
+        let max_internal = readings
+            .iter()
+            .map(SensorReading::internal_buffer_len)
+            .max()
+            .unwrap_or(0);
+        sensor_internal_buffer_max.insert(sensor_id.clone(), max_internal);
+
         let stats = AggregationEngine::compute_stats(&readings);
         AggregationEngine::detect_anomalies(
             &sensor_id,
@@ -264,5 +272,6 @@ fn make_frame(
         window_end,
         sensor_stats: stats_map,
         anomalies,
+        sensor_internal_buffer_max,
     }
 }

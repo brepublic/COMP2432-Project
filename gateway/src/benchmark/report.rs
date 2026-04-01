@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::benchmark::{ScenarioConfig, Thresholds};
+use crate::benchmark::{expected_ingest_per_sec, ScenarioConfig, Thresholds};
 use crate::benchmark::collector::{HttpLoadMetrics, SamplingResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,7 +13,21 @@ pub struct ScenarioSummary {
     pub near_full_samples: usize,
     pub near_full_ratio: f64,
     pub peak_sensor_utilization: f64,
-    pub frame_tps: f64,
+    pub peak_sensor_peak_utilization: f64,
+    pub ingest_throughput_avg_rps: f64,
+    pub ingest_throughput_p95_rps: f64,
+    pub processing_throughput_avg_rps: f64,
+    pub processing_throughput_p95_rps: f64,
+    pub serving_throughput_avg_rps: f64,
+    pub serving_throughput_p95_rps: f64,
+    pub frame_tps_avg: f64,
+    pub frame_tps_stddev: f64,
+    pub ingest_total_pushed_end: u64,
+    pub ingest_total_popped_end: u64,
+    /// Cumulative count from `/api/latest`-based sampling (may undercount when the latest window is small).
+    pub processing_total_readings_end: u64,
+    /// Sum of reading counts from `/api/range` over the measure-phase window span (when available).
+    pub processing_total_readings_range: Option<u64>,
     pub pipeline_latency_avg_ms: f64,
     pub pipeline_latency_p95_ms: f64,
     pub cpu_avg_pct: f64,
@@ -25,6 +39,12 @@ pub struct ScenarioSummary {
     pub http_latency_p50_ms: f64,
     pub http_latency_p95_ms: f64,
     pub http_latency_p99_ms: f64,
+    /// Expected readings produced over `measure_secs` at configured sensor rates.
+    pub ingest_expected_measure_total: u64,
+    /// `ingest_total_pushed` delta between first and last measure-phase samples.
+    pub ingest_delta_measure: u64,
+    /// `ingest_delta_measure / ingest_expected_measure_total` (0 if expected is 0).
+    pub ingest_measure_ratio: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,14 +74,21 @@ pub fn build_summary(
         .iter()
         .map(|r| r.peak_sensor_utilization)
         .fold(0.0, f64::max);
+    let peak_sensor_peak_utilization = measured
+        .iter()
+        .map(|r| r.peak_sensor_peak_utilization)
+        .fold(0.0, f64::max);
 
-    let frame_tps = if let (Some(first), Some(last)) = (measured.first(), measured.last()) {
-        let dt = (last.ts_ms.saturating_sub(first.ts_ms)).max(1);
-        let frames = last.total_frames.saturating_sub(first.total_frames);
-        (frames as f64 * 1000.0) / dt as f64
-    } else {
-        0.0
-    };
+    let ingest_series: Vec<f64> = measured.iter().map(|r| r.ingest_readings_per_sec).collect();
+    let processing_series: Vec<f64> = measured
+        .iter()
+        .map(|r| r.processing_readings_per_sec)
+        .collect();
+    let serving_series: Vec<f64> = measured
+        .iter()
+        .map(|r| r.serving_http_rps_interval)
+        .collect();
+    let frame_tps_series: Vec<f64> = measured.iter().map(|r| r.frame_tps_interval).collect();
 
     let pipeline_latencies: Vec<u64> = measured.iter().map(|r| r.pipeline_latency_ms).collect();
     let pipeline_latency_avg_ms = average_u64(&pipeline_latencies);
@@ -84,7 +111,24 @@ pub fn build_summary(
     let total_http = http.success + http.fail;
     let http_error_rate = ratio(http.fail as f64, total_http as f64);
     let http_rps = ratio(http.success as f64, scenario.measure_secs as f64);
-    let lat_ms: Vec<f64> = http.latencies_us.iter().map(|v| *v as f64 / 1000.0).collect();
+    let lat_ms: Vec<f64> = http
+        .latencies_us
+        .iter()
+        .map(|v| *v as f64 / 1000.0)
+        .collect();
+
+    let rps = expected_ingest_per_sec(&scenario.sensors);
+    let ingest_expected_measure_total = scenario.measure_secs.saturating_mul(rps);
+    let (ingest_delta_measure, ingest_measure_ratio) =
+        if let (Some(first), Some(last)) = (measured.first(), measured.last()) {
+            let delta = last
+                .ingest_total_pushed
+                .saturating_sub(first.ingest_total_pushed);
+            let ratio_val = ratio(delta as f64, ingest_expected_measure_total as f64);
+            (delta, ratio_val)
+        } else {
+            (0, 0.0)
+        };
 
     Ok(ScenarioSummary {
         scenario_id: scenario.id.clone(),
@@ -93,7 +137,22 @@ pub fn build_summary(
         near_full_samples,
         near_full_ratio,
         peak_sensor_utilization,
-        frame_tps,
+        peak_sensor_peak_utilization,
+        ingest_throughput_avg_rps: average_f64(&ingest_series),
+        ingest_throughput_p95_rps: percentile_f64(&ingest_series, 95.0),
+        processing_throughput_avg_rps: average_f64(&processing_series),
+        processing_throughput_p95_rps: percentile_f64(&processing_series, 95.0),
+        serving_throughput_avg_rps: average_f64(&serving_series),
+        serving_throughput_p95_rps: percentile_f64(&serving_series, 95.0),
+        frame_tps_avg: average_f64(&frame_tps_series),
+        frame_tps_stddev: stddev_f64(&frame_tps_series),
+        ingest_total_pushed_end: measured.last().map(|r| r.ingest_total_pushed).unwrap_or(0),
+        ingest_total_popped_end: measured.last().map(|r| r.ingest_total_popped).unwrap_or(0),
+        processing_total_readings_end: measured
+            .last()
+            .map(|r| r.processing_total_readings)
+            .unwrap_or(0),
+        processing_total_readings_range: sampling.range_processing_readings_total,
         pipeline_latency_avg_ms,
         pipeline_latency_p95_ms,
         cpu_avg_pct,
@@ -105,12 +164,19 @@ pub fn build_summary(
         http_latency_p50_ms: percentile_f64(&lat_ms, 50.0),
         http_latency_p95_ms: percentile_f64(&lat_ms, 95.0),
         http_latency_p99_ms: percentile_f64(&lat_ms, 99.0),
+        ingest_expected_measure_total,
+        ingest_delta_measure,
+        ingest_measure_ratio,
     })
 }
 
 pub fn build_checks(scenario: &ScenarioConfig, summary: &ScenarioSummary) -> Vec<CheckResult> {
     let t: &Thresholds = &scenario.thresholds;
-    vec![
+    let processing_total_for_ingest_check = summary
+        .processing_total_readings_range
+        .unwrap_or(summary.processing_total_readings_end);
+
+    let mut checks = vec![
         CheckResult {
             name: "zero_data_loss_overflow".to_string(),
             passed: summary.overflow_events == 0,
@@ -153,7 +219,32 @@ pub fn build_checks(scenario: &ScenarioConfig, summary: &ScenarioSummary) -> Vec
             actual: format!("{:.2}", summary.cpu_peak_pct),
             target: format!("<= {:.2}", t.max_cpu_peak_pct),
         },
-    ]
+        CheckResult {
+            name: "processing_not_exceed_ingest".to_string(),
+            passed: processing_total_for_ingest_check <= summary.ingest_total_pushed_end,
+            actual: format!(
+                "processing_total={} ingest_total={}",
+                processing_total_for_ingest_check, summary.ingest_total_pushed_end
+            ),
+            target: "processing_total <= ingest_total (uses /api/range sum when available)".to_string(),
+        },
+    ];
+
+    if t.min_ingest_ratio > 0.0 && summary.ingest_expected_measure_total > 0 {
+        checks.push(CheckResult {
+            name: "ingest_meets_expected".to_string(),
+            passed: summary.ingest_measure_ratio >= t.min_ingest_ratio,
+            actual: format!(
+                "ratio {:.4} (delta {} / expected {})",
+                summary.ingest_measure_ratio,
+                summary.ingest_delta_measure,
+                summary.ingest_expected_measure_total
+            ),
+            target: format!(">= {:.4}", t.min_ingest_ratio),
+        });
+    }
+
+    checks
 }
 
 pub fn write_markdown_digest(
@@ -169,7 +260,40 @@ pub fn write_markdown_digest(
     md.push_str(&format!("- Checks passed: {passed}/{total}\n"));
     md.push_str(&format!("- Overflow events: {}\n", summary.overflow_events));
     md.push_str(&format!("- Near-full ratio: {:.4}\n", summary.near_full_ratio));
-    md.push_str(&format!("- Frame throughput (tps): {:.2}\n", summary.frame_tps));
+    md.push_str(&format!(
+        "- Peak sensor utilization (instant / peak-historical max): {:.4} / {:.4}\n",
+        summary.peak_sensor_utilization, summary.peak_sensor_peak_utilization
+    ));
+    md.push_str(&format!(
+        "- Ingest throughput avg/p95 (readings/s): {:.2}/{:.2}\n",
+        summary.ingest_throughput_avg_rps, summary.ingest_throughput_p95_rps
+    ));
+    md.push_str(&format!(
+        "- Processing throughput avg/p95 (readings/s): {:.2}/{:.2}\n",
+        summary.processing_throughput_avg_rps, summary.processing_throughput_p95_rps
+    ));
+    md.push_str("(Processing series from `/api/latest` window; may undercount under heavy load.)\n");
+    md.push_str(&format!(
+        "- Serving throughput avg/p95 (success rps): {:.2}/{:.2}\n",
+        summary.serving_throughput_avg_rps, summary.serving_throughput_p95_rps
+    ));
+    md.push_str(&format!(
+        "- Frame TPS health avg/stddev: {:.3}/{:.3}\n",
+        summary.frame_tps_avg, summary.frame_tps_stddev
+    ));
+    md.push_str(&format!(
+        "- Totals (ingest pushed/popped, processing latest-accum, processing range): {}/{}/{}/{:?}\n",
+        summary.ingest_total_pushed_end,
+        summary.ingest_total_popped_end,
+        summary.processing_total_readings_end,
+        summary.processing_total_readings_range
+    ));
+    md.push_str(&format!(
+        "- Ingest budget (measure phase): expected {}, delta {}, ratio {:.4}\n",
+        summary.ingest_expected_measure_total,
+        summary.ingest_delta_measure,
+        summary.ingest_measure_ratio
+    ));
     md.push_str(&format!("- Pipeline latency avg/p95 (ms): {:.2}/{:.2}\n", summary.pipeline_latency_avg_ms, summary.pipeline_latency_p95_ms));
     md.push_str(&format!("- HTTP success/fail: {}/{}\n", summary.http_success, summary.http_fail));
     md.push_str(&format!("- HTTP latency p50/p95/p99 (ms): {:.2}/{:.2}/{:.2}\n", summary.http_latency_p50_ms, summary.http_latency_p95_ms, summary.http_latency_p99_ms));
@@ -227,4 +351,13 @@ fn percentile_f64(v: &[f64], p: f64) -> f64 {
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let idx = (((p / 100.0) * ((s.len() - 1) as f64)).round() as usize).min(s.len() - 1);
     s[idx]
+}
+
+fn stddev_f64(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mean = average_f64(v);
+    let var = v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / v.len() as f64;
+    var.sqrt()
 }

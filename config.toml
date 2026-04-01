@@ -10,6 +10,11 @@ force_rates_per_sec = "50"
 # SharedBuffer capacity (number of readings).
 capacity = 5000
 
+[sensor_internal_buffer]
+# Internal per-sensor queue (sensor_sim ring): usable slots and near-full warning ratio.
+usable_capacity = 127
+near_full_ratio = 0.85
+
 [dashboard]
 addr = "127.0.0.1:5800"
 

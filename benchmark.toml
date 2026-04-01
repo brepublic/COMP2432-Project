@@ -1,3 +1,10 @@
+# Benchmark scenarios for gateway + dashboard.
+#
+# HTTP load: set `endpoints = ["/api/latest", ...]` for round-robin across paths.
+# Avoid high QPS on `/api/range` — each request scans all stored frames from disk.
+# Ingest gate: `min_ingest_ratio` (under [scenarios.thresholds]) compares measure-phase
+# pushed_total delta to expected readings (sum of sensor rates × measure_secs). Use 0.0 to disable.
+
 [global]
 gateway_bin = "target/release/gateway"
 dashboard_host = "127.0.0.1"
@@ -24,8 +31,12 @@ force_rates_per_sec = "50"
 [scenarios.http_load]
 enabled = true
 endpoint = "/api/latest"
+endpoints = ["/api/latest", "/api/stats", "/api/sensor/thermo-1"]
 concurrency = 1
 timeout_ms = 1000
+
+[scenarios.thresholds]
+min_ingest_ratio = 0.75
 
 [[scenarios]]
 id = "data_loss_normal"
@@ -49,6 +60,9 @@ endpoint = "/api/stats"
 concurrency = 10
 timeout_ms = 1000
 
+[scenarios.thresholds]
+min_ingest_ratio = 0.78
+
 [[scenarios]]
 id = "perf_http_100"
 description = "Performance with high HTTP concurrency"
@@ -70,6 +84,9 @@ enabled = true
 endpoint = "/api/latest"
 concurrency = 100
 timeout_ms = 1200
+
+[scenarios.thresholds]
+min_ingest_ratio = 0.75
 
 [[scenarios]]
 id = "scalability_12_sensors"
@@ -93,6 +110,59 @@ endpoint = "/api/stats"
 concurrency = 20
 timeout_ms = 1000
 
+[scenarios.thresholds]
+min_ingest_ratio = 0.75
+
+[[scenarios]]
+id = "scalability_18_sensors"
+description = "Scalability with 18 sensors at fixed rates"
+warmup_secs = 20
+measure_secs = 180
+cooldown_secs = 10
+buffer_capacity = 12000
+
+[scenarios.sensors]
+thermo_count = 6
+thermo_rates_per_sec = "45 45 45 45 45 45"
+accel_count = 6
+accel_rates_per_sec = "45 45 45 45 45 45"
+force_count = 6
+force_rates_per_sec = "45 45 45 45 45 45"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/stats"
+concurrency = 24
+timeout_ms = 1000
+
+[scenarios.thresholds]
+min_ingest_ratio = 0.75
+
+[[scenarios]]
+id = "scalability_24_sensors"
+description = "Scalability with 24 sensors at fixed rates"
+warmup_secs = 25
+measure_secs = 180
+cooldown_secs = 10
+buffer_capacity = 16000
+
+[scenarios.sensors]
+thermo_count = 8
+thermo_rates_per_sec = "40 40 40 40 40 40 40 40"
+accel_count = 8
+accel_rates_per_sec = "40 40 40 40 40 40 40 40"
+force_count = 8
+force_rates_per_sec = "40 40 40 40 40 40 40 40"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/stats"
+concurrency = 32
+timeout_ms = 1200
+
+[scenarios.thresholds]
+min_ingest_ratio = 0.75
+
 [[scenarios]]
 id = "stress_mixed"
 description = "Mixed stress with high ingest and HTTP concurrency"
@@ -114,3 +184,6 @@ enabled = true
 endpoint = "/api/latest"
 concurrency = 200
 timeout_ms = 1500
+
+[scenarios.thresholds]
+min_ingest_ratio = 0.72
