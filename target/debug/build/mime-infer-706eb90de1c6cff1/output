@@ -1,1 +1,0 @@
-cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/runner/work/COMP2432-Project/COMP2432-Project/target/debug/build/mime-infer-706eb90de1c6cff1/out/mime_types_generated.rs
