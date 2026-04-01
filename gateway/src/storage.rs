@@ -17,16 +17,6 @@ impl DataStorage {
         Self { base_path }
     }
 
-    /// Where the web server should read files from.
-    pub fn path(&self) -> PathBuf {
-        self.base_path.clone()
-    }
-
-    /// Equivalent of flush: each `write()` syncs to disk before rename.
-    pub fn flush(&self) {
-        // Intentionally empty: `write()` calls `sync_all()` on the temp file.
-    }
-
     /// Write one aggregated frame as an atomic file update.
     ///
     /// We write to a temp file, call `sync_all()`, then atomically `rename()` to the final name.

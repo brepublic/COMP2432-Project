@@ -84,21 +84,6 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         self.not_empty.notify_one(); // Wake a potential consumer
     }
 
-    /// Pop a reading from the buffer, blocking until data arrives.
-    pub fn pop(&self) -> SensorReading {
-        let mut queue = self.queue.lock().unwrap();
-        queue = self
-            .not_empty
-            .wait_while(queue, |q| q.is_empty())
-            .unwrap();
-
-        let val = queue.pop_front().unwrap();
-        self.popped_total.fetch_add(1, Ordering::Relaxed);
-        // Wake a potential producer waiting for free capacity.
-        self.not_full.notify_one();
-        val
-    }
-
     /// Pop a reading from the buffer. If the buffer is empty, block until data arrives.
     /// Pop with timeout. Returns `None` on timeout.
     pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
@@ -116,17 +101,6 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
             self.not_full.notify_one();
             Some(val)
         }
-    }
-
-    /// Try to pop a reading without blocking.
-    pub fn try_pop(&self) -> Option<SensorReading> {
-        let mut queue = self.queue.lock().unwrap();
-        let res = queue.pop_front();
-        if res.is_some() {
-            self.popped_total.fetch_add(1, Ordering::Relaxed);
-            self.not_full.notify_one(); // Wake a potential producer.
-        }
-        res
     }
 
     /// Wake all producers/consumers blocked on the buffer.
@@ -186,10 +160,6 @@ pub struct BufferUtilizationStats {
 }
 
 impl SensorBufferManager {
-    pub fn new(capacity: usize) -> Self {
-        Self::new_with_policy(capacity, false)
-    }
-
     pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Self {
         Self {
             shared: SharedBuffer::new_with_policy(capacity, fail_on_full),
@@ -203,10 +173,6 @@ impl SensorBufferManager {
 
     pub fn shared(&self) -> Arc<SharedBuffer> {
         self.shared.clone()
-    }
-
-    pub fn len(&self) -> usize {
-        self.shared.len()
     }
 
     /// Register a sensor (spawns a reader thread).
@@ -280,21 +246,6 @@ impl SensorBufferManager {
         });
 
         self.reader_handles.push(reader_handle);
-    }
-
-    /// Pop reading for processing (blocking).
-    pub fn pop(&self) -> SensorReading {
-        self.shared.pop()
-    }
-
-    /// Pop with timeout. Returns `None` on timeout.
-    pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
-        self.shared.pop_timeout(timeout)
-    }
-
-    /// Non-blocking pop.
-    pub fn try_pop(&self) -> Option<SensorReading> {
-        self.shared.try_pop()
     }
 
     /// Get buffer utilization statistics (including rates).

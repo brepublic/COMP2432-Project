@@ -11,7 +11,9 @@
         .muted { color: #64748b; }
         table { width: 100%; border-collapse: collapse; margin-top: 8px; }
         th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
-        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #fee2e2; color: #991b1b; font-size: 12px; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+        .badge-ok { background: #dcfce7; color: #166534; }
+        .badge-alert { background: #fee2e2; color: #991b1b; }
         .sensor-anomaly { color: #991b1b; font-weight: 700; }
         a { color: #0969da; }
     </style>
@@ -40,6 +42,8 @@
 
         function renderFrame(frame) {
             const sensors = Object.keys(frame.sensor_stats || {}).sort(compareSensorIds);
+            const anomalyCount = (frame.anomalies || []).length;
+            const anomalyBadgeClass = anomalyCount > 0 ? "badge-alert" : "badge-ok";
             const anomalySensors = new Set((frame.anomalies || []).map((a) => a.sensor_id));
             const rows = sensors.map((id) => {
                 const s = frame.sensor_stats[id];
@@ -56,7 +60,7 @@
             return `
                 <div class="card">
                     <div><strong>Frame #${frame.frame_id}</strong> <span class="muted">window_end=${frame.window_end}</span></div>
-                    <div style="margin-top:6px;">Anomalies: <span class="badge">${(frame.anomalies || []).length}</span></div>
+                    <div style="margin-top:6px;">Anomalies: <span class="badge ${anomalyBadgeClass}">${anomalyCount}</span></div>
                     <table>
                         <thead><tr><th>Sensor</th><th>Count</th><th>Avg</th><th>Min</th><th>Max</th><th>Stddev</th></tr></thead>
                         <tbody>${rows || `<tr><td colspan="6" class="muted">No sensor stats</td></tr>`}</tbody>

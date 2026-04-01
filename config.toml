@@ -10,3 +10,6 @@ force_rates_per_sec = "50"
 # SharedBuffer capacity (number of readings).
 capacity = 5000
 
+[dashboard]
+addr = "127.0.0.1:5800"
+

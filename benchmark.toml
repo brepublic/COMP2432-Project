@@ -1,0 +1,116 @@
+[global]
+gateway_bin = "target/release/gateway"
+dashboard_host = "127.0.0.1"
+base_port = 5900
+results_dir = "bench_results"
+poll_interval_ms = 1000
+
+[[scenarios]]
+id = "baseline"
+description = "Functional baseline with light HTTP load"
+warmup_secs = 20
+measure_secs = 120
+cooldown_secs = 10
+buffer_capacity = 5000
+
+[scenarios.sensors]
+thermo_count = 2
+thermo_rates_per_sec = "50 30"
+accel_count = 2
+accel_rates_per_sec = "50 50"
+force_count = 1
+force_rates_per_sec = "50"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/latest"
+concurrency = 1
+timeout_ms = 1000
+
+[[scenarios]]
+id = "data_loss_normal"
+description = "Data loss verification under normal sustained load"
+warmup_secs = 20
+measure_secs = 180
+cooldown_secs = 10
+buffer_capacity = 6000
+
+[scenarios.sensors]
+thermo_count = 4
+thermo_rates_per_sec = "20 20 20 20"
+accel_count = 4
+accel_rates_per_sec = "20 20 20 20"
+force_count = 4
+force_rates_per_sec = "20 20 20 20"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/stats"
+concurrency = 10
+timeout_ms = 1000
+
+[[scenarios]]
+id = "perf_http_100"
+description = "Performance with high HTTP concurrency"
+warmup_secs = 20
+measure_secs = 180
+cooldown_secs = 10
+buffer_capacity = 6000
+
+[scenarios.sensors]
+thermo_count = 2
+thermo_rates_per_sec = "60 60"
+accel_count = 2
+accel_rates_per_sec = "60 60"
+force_count = 2
+force_rates_per_sec = "60 60"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/latest"
+concurrency = 100
+timeout_ms = 1200
+
+[[scenarios]]
+id = "scalability_12_sensors"
+description = "Scalability with 12 sensors at fixed rates"
+warmup_secs = 20
+measure_secs = 180
+cooldown_secs = 10
+buffer_capacity = 9000
+
+[scenarios.sensors]
+thermo_count = 4
+thermo_rates_per_sec = "50 50 50 50"
+accel_count = 4
+accel_rates_per_sec = "50 50 50 50"
+force_count = 4
+force_rates_per_sec = "50 50 50 50"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/stats"
+concurrency = 20
+timeout_ms = 1000
+
+[[scenarios]]
+id = "stress_mixed"
+description = "Mixed stress with high ingest and HTTP concurrency"
+warmup_secs = 20
+measure_secs = 300
+cooldown_secs = 20
+buffer_capacity = 12000
+
+[scenarios.sensors]
+thermo_count = 4
+thermo_rates_per_sec = "120 120 120 120"
+accel_count = 4
+accel_rates_per_sec = "120 120 120 120"
+force_count = 4
+force_rates_per_sec = "120 120 120 120"
+
+[scenarios.http_load]
+enabled = true
+endpoint = "/api/latest"
+concurrency = 200
+timeout_ms = 1500

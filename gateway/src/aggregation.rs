@@ -141,11 +141,6 @@ impl AggregationEngine {
         }
     }
 
-    /// Connect/replace the buffer data source (kept to match the spec interface wording).
-    pub fn connect(&mut self, buffer: Arc<SharedBuffer>) {
-        self.buffer = buffer;
-    }
-
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         while let Some(handle) = self.worker_handles.pop() {

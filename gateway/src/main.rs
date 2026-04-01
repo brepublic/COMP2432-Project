@@ -37,6 +37,8 @@ const SENSOR_NEAR_FULL_RATIO: f64 = 0.85;
 struct GatewayConfig {
     sensors: SensorsConfig,
     buffer: BufferConfig,
+    #[serde(default)]
+    dashboard: DashboardConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +56,20 @@ struct BufferConfig {
     capacity: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct DashboardConfig {
+    addr: String,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:5800".to_string(),
+        }
+    }
+}
+
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
@@ -66,6 +82,7 @@ impl Default for GatewayConfig {
                 force_rates_per_sec: "75".to_string(),
             },
             buffer: BufferConfig { capacity: 5000 },
+            dashboard: DashboardConfig::default(),
         }
     }
 }
@@ -203,8 +220,11 @@ fn main() {
     engine.start(); // Start aggregation worker threads
 
     // 6. Start the Web server thread (dashboard)
-    let dashboard_addr =
-        std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string());
+    let dashboard_addr = if cfg.dashboard.addr.trim().is_empty() {
+        std::env::var("DASHBOARD_ADDR").unwrap_or_else(|_| "127.0.0.1:5800".to_string())
+    } else {
+        cfg.dashboard.addr.clone()
+    };
 
     let dashboard_handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
