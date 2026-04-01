@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>System Statistics</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 24px; background: #f8fafc; color: #0f172a; }
+        .header { display: flex; justify-content: space-between; align-items: baseline; }
+        .meta { color: #475569; }
+        .grid { display: grid; grid-template-columns: repeat(5, minmax(140px, 1fr)); gap: 10px; margin-top: 12px; }
+        .card { background: #fff; border: 1px solid #d0d7de; border-radius: 10px; padding: 12px; }
+        .label { color: #64748b; font-size: 12px; }
+        .value { font-size: 22px; font-weight: 700; margin-top: 6px; }
+        .sensor-list { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+        .chip { background: #e2e8f0; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+        .ok { color: #166534; }
+        .warn { color: #991b1b; font-weight: 700; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; background: #fff; }
+        th, td { border-bottom: 1px solid #e2e8f0; text-align: left; padding: 8px; font-size: 14px; }
+        a { color: #0969da; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>System Statistics</h1>
+        <a href="/">Back to home</a>
+    </div>
+    <div class="meta">Auto refresh: every 1 second</div>
+
+    <div class="grid">
+        <div class="card"><div class="label">Total Frames</div><div class="value" id="total-frames">-</div></div>
+        <div class="card"><div class="label">Total Anomalies</div><div class="value" id="total-anomalies">-</div></div>
+        <div class="card"><div class="label">Latest Frame ID</div><div class="value" id="latest-frame-id">-</div></div>
+        <div class="card"><div class="label">Latest Window End</div><div class="value" id="latest-window-end">-</div></div>
+        <div class="card"><div class="label">Data Loss</div><div class="value ok" id="data-loss">NO</div></div>
+    </div>
+
+    <h3 style="margin-top:16px;">Sensors Seen</h3>
+    <div id="sensor-list" class="sensor-list"></div>
+
+    <h3 style="margin-top:16px;">Sensor Internal Buffer (128-ring, 127 usable)</h3>
+    <div id="buffer-alert" class="meta">Loading buffer telemetry...</div>
+    <table>
+        <thead>
+            <tr>
+                <th>Sensor</th>
+                <th>Current</th>
+                <th>Capacity</th>
+                <th>Usage</th>
+                <th>Peak</th>
+                <th>Peak Usage</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody id="buffer-rows">
+            <tr><td colspan="7">Loading...</td></tr>
+        </tbody>
+    </table>
+
+    <script>
+        let dataLossLatched = false;
+
+        function updateDataLossIndicator() {
+            const dataLossEl = document.getElementById("data-loss");
+            dataLossEl.textContent = dataLossLatched ? "YES" : "NO";
+            dataLossEl.className = `value ${dataLossLatched ? "warn" : "ok"}`;
+        }
+
+        async function refresh() {
+            try {
+                const [statsResp, bufferResp] = await Promise.all([
+                    fetch("/api/stats", { cache: "no-store" }),
+                    fetch("/api/buffer", { cache: "no-store" }),
+                ]);
+                if (!statsResp.ok) throw new Error("stats HTTP " + statsResp.status);
+                if (!bufferResp.ok) throw new Error("buffer HTTP " + bufferResp.status);
+
+                const data = await statsResp.json();
+                const buffer = await bufferResp.json();
+                document.getElementById("total-frames").textContent = data.total_frames ?? "-";
+                document.getElementById("total-anomalies").textContent = data.total_anomalies ?? "-";
+                document.getElementById("latest-frame-id").textContent = data.latest_frame_id ?? "-";
+                document.getElementById("latest-window-end").textContent = data.latest_window_end ?? "-";
+
+                const list = document.getElementById("sensor-list");
+                const sensors = Array.isArray(data.sensors_seen) ? data.sensors_seen : [];
+                list.innerHTML = sensors.length
+                    ? sensors.map(s => `<span class="chip">${s}</span>`).join("")
+                    : `<span class="chip">No sensors yet</span>`;
+
+                const warnings = Array.isArray(buffer.warnings) ? buffer.warnings : [];
+                const alertEl = document.getElementById("buffer-alert");
+                if (warnings.length > 0) {
+                    const level = buffer.any_full ? "FULL" : "NEAR FULL";
+                    alertEl.className = "warn";
+                    alertEl.textContent = `Warning (${level}): ` + warnings.join(" | ");
+                } else {
+                    alertEl.className = "ok";
+                    alertEl.textContent = "All sensor internal buffers are in safe range.";
+                }
+
+                const rowsEl = document.getElementById("buffer-rows");
+                const sensorsBuf = Array.isArray(buffer.sensors) ? buffer.sensors : [];
+                const hasFullNow = Boolean(buffer.any_full) || sensorsBuf.some((s) => Boolean(s.full));
+                const hasFullHistory = sensorsBuf.some((s) => Number(s.capacity) > 0 && Number(s.peak_len) >= Number(s.capacity));
+                dataLossLatched = dataLossLatched || hasFullNow || hasFullHistory;
+                updateDataLossIndicator();
+                rowsEl.innerHTML = sensorsBuf.length
+                    ? sensorsBuf.map((s) => {
+                        const status = s.full ? "FULL" : (s.near_full ? "NEAR FULL" : "OK");
+                        const rowClass = s.full || s.near_full ? "warn" : "ok";
+                        return `<tr class="${rowClass}">
+                            <td>${s.sensor_id}</td>
+                            <td>${s.current_len}</td>
+                            <td>${s.capacity}</td>
+                            <td>${(Number(s.utilization_ratio) * 100).toFixed(1)}%</td>
+                            <td>${s.peak_len}</td>
+                            <td>${(Number(s.peak_utilization_ratio) * 100).toFixed(1)}%</td>
+                            <td>${status}</td>
+                        </tr>`;
+                    }).join("")
+                    : '<tr><td colspan="7">No sensor buffer data yet.</td></tr>';
+            } catch (error) {
+                document.getElementById("sensor-list").innerHTML = `<span class="chip">Failed to fetch data: ${error}</span>`;
+                document.getElementById("buffer-alert").className = "warn";
+                document.getElementById("buffer-alert").textContent = `Failed to fetch buffer telemetry: ${error}`;
+                document.getElementById("buffer-rows").innerHTML = `<tr><td colspan="7">Failed to fetch data: ${error}</td></tr>`;
+            }
+        }
+        updateDataLossIndicator();
+        refresh();
+        setInterval(refresh, 1000);
+    </script>
+</body>
+</html>
+
