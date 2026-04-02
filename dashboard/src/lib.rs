@@ -21,6 +21,13 @@ mod resource;
 const DATA_DIR: &str = "./data";
 const MAX_LATEST_FRAMES: usize = 10;
 const MAX_CACHED_FRAMES: usize = 65_536;
+/// How long the in-memory frames cache remains valid without a push or a completed disk refresh.
+///
+/// Under normal operation (1-second aggregation windows) the gateway calls
+/// [`record_aggregated_frame`] roughly every second, so `refreshed_at_ms` stays well within
+/// this window and the cache is always considered fresh.  The TTL exists only as a safety net
+/// for periods of sensor inactivity: if no new frames arrive for this duration, the next API
+/// request falls back to a full disk scan instead of serving increasingly stale data.
 const FRAMES_CACHE_TTL_MS: u64 = 5000;
 static BUFFER_TELEMETRY: OnceLock<RwLock<Option<BufferTelemetrySnapshot>>> = OnceLock::new();
 static THROUGHPUT_TELEMETRY: OnceLock<RwLock<Option<ThroughputTelemetrySnapshot>>> = OnceLock::new();
@@ -36,6 +43,24 @@ struct InternalBufferPolicy {
     near_full_ratio: f64,
 }
 
+/// In-memory frames cache state.
+///
+/// The cache is the central piece of the latency fix for `/api/latest`.
+///
+/// **How it works:**
+/// 1. Every time the aggregation engine persists a frame to disk
+///    (`DataStorage::write`), it also calls [`record_aggregated_frame`] to push
+///    the same frame here synchronously.
+/// 2. [`record_aggregated_frame`] merges the new frame into `frames` and updates
+///    `refreshed_at_ms` to the current wall-clock time.
+/// 3. When a `/api/latest` request arrives, [`load_latest_frames_for_api`] checks
+///    whether `now - refreshed_at_ms ≤ FRAMES_CACHE_TTL_MS`.  With 1-second
+///    aggregation windows, the cache was refreshed at most ~1 second ago, so the
+///    check passes and the handler returns the top-10 frames directly from
+///    `self.frames` without any disk I/O.
+///
+/// This eliminates the original 3-4 second delay that occurred when every
+/// `/api/latest` request triggered a full scan of every JSON file in `./data`.
 struct FramesCacheState {
     refreshed_at_ms: u64,
     refreshing: bool,
@@ -72,7 +97,16 @@ fn merge_frame_into_vec(frames: &mut Vec<AggregatedFrame>, frame: AggregatedFram
     }
 }
 
-/// Called from the gateway after each frame is persisted so the dashboard can update without a full disk scan.
+/// Push a newly-written frame into the in-memory cache.
+///
+/// Called by the gateway's `DataStorage::write` **after** every successful disk
+/// write so that [`load_latest_frames_for_api`] (and the other frame-serving
+/// helpers) can serve requests without performing a full disk scan.
+///
+/// * If a background disk refresh is currently in flight (`cache.refreshing = true`),
+///   the frame is queued in `pending_pushes` and merged once the refresh finishes.
+/// * Otherwise the frame is merged into `cache.frames` immediately and
+///   `refreshed_at_ms` is bumped, which keeps the TTL clock from expiring.
 pub fn record_aggregated_frame(frame: AggregatedFrame) {
     let notify = {
         let Ok(mut cache) = frames_cache_store().lock() else {
@@ -942,5 +976,53 @@ mod tests {
             frames.push(make_frame(fid, we % 10_000));
         }
         assert_same_latest(&newest_frames_bounded(&frames), &newest_frames_naive(&frames));
+    }
+
+    // --- Tests for merge_frame_into_vec (the in-memory cache push path) ---
+
+    #[test]
+    fn merge_frame_adds_new_frame() {
+        let mut frames = vec![make_frame(1, 100)];
+        merge_frame_into_vec(&mut frames, make_frame(2, 200));
+        assert_eq!(frames.len(), 2);
+    }
+
+    #[test]
+    fn merge_frame_deduplicates_same_key() {
+        // Inserting a frame whose (window_end, frame_id) already exists should not
+        // grow the list — it replaces the existing entry.
+        let mut frames = vec![make_frame(1, 100), make_frame(2, 200)];
+        merge_frame_into_vec(&mut frames, make_frame(1, 100));
+        assert_eq!(frames.len(), 2);
+    }
+
+    #[test]
+    fn merge_frame_keeps_ascending_order() {
+        // The cache stores frames sorted by (window_end, frame_id) ascending so that
+        // slicing the tail (or using newest_frames_bounded) gives the latest frames.
+        let mut frames = vec![make_frame(3, 300), make_frame(1, 100)];
+        merge_frame_into_vec(&mut frames, make_frame(2, 200));
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0].window_end, 100);
+        assert_eq!(frames[1].window_end, 200);
+        assert_eq!(frames[2].window_end, 300);
+    }
+
+    #[test]
+    fn merge_frame_caps_at_max_cached_frames() {
+        // When the cache is at capacity, the oldest frame (lowest window_end) is evicted.
+        let mut frames: Vec<AggregatedFrame> = (0..MAX_CACHED_FRAMES as u64)
+            .map(|i| make_frame(i, i))
+            .collect();
+        merge_frame_into_vec(
+            &mut frames,
+            make_frame(MAX_CACHED_FRAMES as u64, MAX_CACHED_FRAMES as u64),
+        );
+        assert_eq!(frames.len(), MAX_CACHED_FRAMES);
+        // The oldest frame (window_end == 0) must have been evicted.
+        assert!(
+            frames.iter().all(|f| f.window_end > 0),
+            "expected oldest frame to be evicted"
+        );
     }
 }
