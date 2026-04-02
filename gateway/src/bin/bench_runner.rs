@@ -3,6 +3,11 @@ mod benchmark;
 #[path = "../rates.rs"]
 mod rates;
 
+/// CLI entry: `bench_runner [path/to/benchmark.toml]` (defaults to `benchmark.toml`).
+///
+/// # Returns
+///
+/// Exits with code `1` if [`benchmark::run`] fails.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let config_path = if args.len() > 1 {

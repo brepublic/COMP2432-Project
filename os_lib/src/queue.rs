@@ -223,6 +223,15 @@ impl<T: Copy> RWRoundQueue<T> {
         (reader, writer)
     }
 
+    /// Computes the next ring-buffer index using a bitmask (capacity is a power of two).
+    ///
+    /// # Arguments
+    ///
+    /// * `current` — Current slot index in `0..capacity`.
+    ///
+    /// # Returns
+    ///
+    /// The successor index, wrapping at `capacity`.
     #[inline]
     fn next_index(&self, current: usize) -> usize {
         (current + 1) & (self.capacity - 1) // Fast modulo for power of 2
@@ -481,6 +490,11 @@ impl<T: Copy> RWRoundQueue<T> {
 }
 
 impl<T: Copy> Drop for RWRoundQueue<T> {
+    /// Deallocates the backing buffer. No per-element drop is run because `T: Copy`.
+    ///
+    /// # Arguments / returns
+    ///
+    /// Standard [`Drop`] signature: takes `&mut self` and returns `()`.
     fn drop(&mut self) {
         unsafe {
             // No drop needed for Copy types.

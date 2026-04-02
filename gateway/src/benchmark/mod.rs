@@ -2,7 +2,15 @@ pub mod collector;
 pub mod report;
 pub mod scenarios;
 
-/// Expected aggregate sensor readings per second for a scenario (matches gateway sensor registration).
+/// Sums per-sensor rates for thermo, accel, and force families exactly like the gateway `main` registration.
+///
+/// # Arguments
+///
+/// * `sensors` — Counts and rate strings from a [`ScenarioConfig`].
+///
+/// # Returns
+///
+/// Total expected samples per second across all virtual sensors.
 pub fn expected_ingest_per_sec(sensors: &SensorScenarioConfig) -> u64 {
     use crate::rates::{parse_rates, rate_for_index};
     let thermo = parse_rates(&sensors.thermo_rates_per_sec, 50);
@@ -128,6 +136,11 @@ pub struct Thresholds {
 }
 
 impl Default for Thresholds {
+    /// Conservative HTTP/CPU/buffer gates suitable for CI-style benchmarking.
+    ///
+    /// # Returns
+    ///
+    /// [`Thresholds`] with ingest ratio check disabled (`min_ingest_ratio = 0`).
     fn default() -> Self {
         Self {
             max_http_error_rate: default_max_error_rate(),
@@ -142,6 +155,11 @@ impl Default for Thresholds {
 }
 
 impl Default for GlobalConfig {
+    /// Local paths, host `127.0.0.1`, base port `5900`, and `bench_results` output directory.
+    ///
+    /// # Returns
+    ///
+    /// [`GlobalConfig`] defaults.
     fn default() -> Self {
         Self {
             gateway_bin: default_gateway_bin(),
@@ -154,6 +172,15 @@ impl Default for GlobalConfig {
     }
 }
 
+/// Loads a TOML benchmark file from disk and executes [`run_config`].
+///
+/// # Arguments
+///
+/// * `config_path` — Path to `benchmark.toml` (or similar).
+///
+/// # Returns
+///
+/// `Ok(())` when every scenario finishes; `Err` with a human-readable message otherwise.
 pub fn run(config_path: &Path) -> Result<(), String> {
     let cfg_text = fs::read_to_string(config_path)
         .map_err(|e| format!("failed to read benchmark config {}: {e}", config_path.display()))?;
@@ -165,6 +192,15 @@ pub fn run(config_path: &Path) -> Result<(), String> {
     run_config(cfg)
 }
 
+/// Runs all scenarios: spawn gateway, optional HTTP load, sampling, summaries, checks, and artifacts.
+///
+/// # Arguments
+///
+/// * `cfg` — Fully parsed [`BenchmarkConfig`] (empty `scenarios` replaced by [`scenarios::default_scenarios`]).
+///
+/// # Returns
+///
+/// `Ok(())` after writing per-scenario outputs under `results_dir/run_<timestamp>/`; `Err` on I/O or setup failure.
 pub fn run_config(cfg: BenchmarkConfig) -> Result<(), String> {
     let run_id = now_millis();
     let run_dir = PathBuf::from(&cfg.global.results_dir).join(format!("run_{run_id}"));
@@ -304,14 +340,33 @@ pub fn run_config(cfg: BenchmarkConfig) -> Result<(), String> {
 struct GatewayChildGuard(Option<std::process::Child>);
 
 impl GatewayChildGuard {
+    /// Wraps a spawned gateway [`std::process::Child`] for scoped cleanup.
+    ///
+    /// # Arguments
+    ///
+    /// * `child` — Running gateway process.
+    ///
+    /// # Returns
+    ///
+    /// Guard that kills the child on drop.
     fn new(child: std::process::Child) -> Self {
         Self(Some(child))
     }
 
+    /// OS process id used for CPU sampling.
+    ///
+    /// # Returns
+    ///
+    /// Child PID.
     fn pid(&self) -> u32 {
         self.0.as_ref().expect("gateway child").id()
     }
 
+    /// Kills and waits on the gateway after a successful benchmark phase.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     fn terminate(mut self) {
         if let Some(mut c) = self.0.take() {
             let _ = c.kill();
@@ -321,6 +376,7 @@ impl GatewayChildGuard {
 }
 
 impl Drop for GatewayChildGuard {
+    /// Ensures the gateway never outlives the guard after a panic or early return.
     fn drop(&mut self) {
         if let Some(mut c) = self.0.take() {
             let _ = c.kill();
@@ -333,14 +389,21 @@ impl Drop for GatewayChildGuard {
 struct HttpLoadStopGuard(Option<HttpLoadHandle>);
 
 impl HttpLoadStopGuard {
+    /// Owns an [`HttpLoadHandle`] until [`Self::finish`] or drop.
     fn new(handle: HttpLoadHandle) -> Self {
         Self(Some(handle))
     }
 
+    /// Shared metrics mutex for correlating sampler rows with HTTP workers.
     fn metrics_shared(&self) -> Arc<Mutex<HttpLoadMetrics>> {
         self.0.as_ref().expect("http load").metrics_shared()
     }
 
+    /// Stops workers and returns a snapshot of success/fail/latencies.
+    ///
+    /// # Returns
+    ///
+    /// Final [`HttpLoadMetrics`].
     fn finish(mut self) -> HttpLoadMetrics {
         let mut h = self.0.take().expect("http load");
         let m = h.metrics();
@@ -350,6 +413,7 @@ impl HttpLoadStopGuard {
 }
 
 impl Drop for HttpLoadStopGuard {
+    /// Stops load threads if [`Self::finish`] was not called.
     fn drop(&mut self) {
         if let Some(mut h) = self.0.take() {
             h.stop();
@@ -357,6 +421,16 @@ impl Drop for HttpLoadStopGuard {
     }
 }
 
+/// Polls `/api/stats` until HTTP 200 or `timeout` elapses.
+///
+/// # Arguments
+///
+/// * `base_url` — e.g. `http://127.0.0.1:5900` without trailing slash.
+/// * `timeout` — Maximum wall time to wait.
+///
+/// # Returns
+///
+/// `Ok(())` when healthy, else `Err` with the base URL embedded in the message.
 fn wait_dashboard_ready(base_url: &str, timeout: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     let client = reqwest::blocking::Client::builder()
@@ -378,6 +452,16 @@ fn wait_dashboard_ready(base_url: &str, timeout: Duration) -> Result<(), String>
     Err(format!("dashboard not ready in {}s: {base_url}", timeout.as_secs()))
 }
 
+/// Serializes a minimal `gateway` TOML for the child process (`GATEWAY_CONFIG` file).
+///
+/// # Arguments
+///
+/// * `s` — Scenario describing sensors and buffer.
+/// * `dashboard_addr` — `host:port` string for `[dashboard].addr`.
+///
+/// # Returns
+///
+/// TOML document as a `String`.
 fn render_gateway_config(s: &ScenarioConfig, dashboard_addr: &str) -> String {
     format!(
         "[sensors]\n\
@@ -402,6 +486,11 @@ addr = \"{}\"\n",
     )
 }
 
+/// Milliseconds since Unix epoch for unique run directory names.
+///
+/// # Returns
+///
+/// `u64` timestamp.
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -409,63 +498,182 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Default relative path to the release `gateway` executable for spawned benchmarks.
+///
+/// # Returns
+///
+/// `"target/release/gateway"`.
 fn default_gateway_bin() -> String {
     "target/release/gateway".to_string()
 }
+
+/// Loopback host for dashboard binding in generated configs.
+///
+/// # Returns
+///
+/// `"127.0.0.1"`.
 fn default_dashboard_host() -> String {
     "127.0.0.1".to_string()
 }
+
+/// First dashboard port in a multi-scenario run.
+///
+/// # Returns
+///
+/// `5900`.
 fn default_base_port() -> u16 {
     5900
 }
+
+/// Port increment between successive scenarios.
+///
+/// # Returns
+///
+/// `1`.
 fn default_port_step() -> u16 {
     1
 }
+
+/// Root directory for timestamped benchmark output trees.
+///
+/// # Returns
+///
+/// `"bench_results"`.
 fn default_results_dir() -> String {
     "bench_results".to_string()
 }
+
+/// Sleep between sampler polls when scraping dashboard APIs.
+///
+/// # Returns
+///
+/// `1000` ms.
 fn default_poll_interval_ms() -> u64 {
     1000
 }
+
+/// Default steady-state warmup before measurements.
+///
+/// # Returns
+///
+/// `20` seconds.
 fn default_warmup_secs() -> u64 {
     20
 }
+
+/// Default timed observation window length.
+///
+/// # Returns
+///
+/// `120` seconds.
 fn default_measure_secs() -> u64 {
     120
 }
+
+/// Quiet period after measurement before tearing down the gateway.
+///
+/// # Returns
+///
+/// `10` seconds.
 fn default_cooldown_secs() -> u64 {
     10
 }
+
+/// Default shared ingress buffer capacity in generated gateway configs.
+///
+/// # Returns
+///
+/// `5000` slots.
 fn default_buffer_capacity() -> usize {
     5000
 }
+
+/// Default single-endpoint HTTP load path.
+///
+/// # Returns
+///
+/// `"/api/latest"`.
 fn default_http_endpoint() -> String {
     "/api/latest".to_string()
 }
+
+/// Default concurrent HTTP clients when load testing.
+///
+/// # Returns
+///
+/// `1`.
 fn default_http_concurrency() -> usize {
     1
 }
+
+/// Per-request timeout for benchmark HTTP workers.
+///
+/// # Returns
+///
+/// `1000` ms.
 fn default_http_timeout_ms() -> u64 {
     1000
 }
+
+/// Maximum acceptable fraction of failed HTTP requests.
+///
+/// # Returns
+///
+/// `0.01`.
 fn default_max_error_rate() -> f64 {
     0.01
 }
+
+/// P95 API latency gate (milliseconds).
+///
+/// # Returns
+///
+/// `200.0`.
 fn default_max_api_p95_ms() -> f64 {
     200.0
 }
+
+/// P99 API latency gate (milliseconds).
+///
+/// # Returns
+///
+/// `500.0`.
 fn default_max_api_p99_ms() -> f64 {
     500.0
 }
+
+/// Average CPU utilization threshold for the gateway process.
+///
+/// # Returns
+///
+/// `75.0` percent.
 fn default_max_cpu_avg_pct() -> f64 {
     75.0
 }
+
+/// Peak CPU utilization threshold for the gateway process.
+///
+/// # Returns
+///
+/// `90.0` percent.
 fn default_max_cpu_peak_pct() -> f64 {
     90.0
 }
+
+/// Maximum acceptable fraction of samples reporting “near full” internal buffers.
+///
+/// # Returns
+///
+/// `0.01`.
 fn default_max_near_full_ratio() -> f64 {
     0.01
 }
+
+/// Minimum ingest ratio (`delta/expected`); `0` disables the check.
+///
+/// # Returns
+///
+/// `0.0`.
 fn default_min_ingest_ratio() -> f64 {
     0.0
 }

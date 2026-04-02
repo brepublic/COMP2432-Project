@@ -3,7 +3,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// Locate a resource file or directory from any execution context
+/// Resolves `resource_path` against the current dir, executable dir, or workspace root.
+///
+/// # Arguments
+///
+/// * `resource_path` — Relative path such as `templates/index.html`.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` when the resource exists on disk, else `None`.
 pub fn locate_resource(resource_path: &str) -> Option<PathBuf> {
     let resource = Path::new(resource_path);
     
@@ -35,7 +43,11 @@ pub fn locate_resource(resource_path: &str) -> Option<PathBuf> {
     None
 }
 
-/// Find the workspace root directory
+/// Walks parents from `current_dir` for a `Cargo.toml` containing `[workspace]`.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` to the workspace root, or `None`.
 fn find_workspace_root() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     

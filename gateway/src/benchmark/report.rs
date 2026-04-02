@@ -55,6 +55,17 @@ pub struct CheckResult {
     pub target: String,
 }
 
+/// Aggregates sampler CSV rows and optional HTTP metrics into one [`ScenarioSummary`].
+///
+/// # Arguments
+///
+/// * `scenario` — Configuration (for ids and measure window length).
+/// * `sampling` — Parsed poll results including measure-phase rows.
+/// * `http_metrics_path` — JSON file written by the benchmark harness (may be absent).
+///
+/// # Returns
+///
+/// `Ok(summary)` or `Err` if HTTP metrics cannot be read when the file exists.
 pub fn build_summary(
     scenario: &ScenarioConfig,
     sampling: &SamplingResult,
@@ -170,6 +181,16 @@ pub fn build_summary(
     })
 }
 
+/// Evaluates [`ScenarioSummary`] against [`Thresholds`] from `scenario`.
+///
+/// # Arguments
+///
+/// * `scenario` — Supplies threshold values (and optional ingest ratio gate).
+/// * `summary` — Measured metrics.
+///
+/// # Returns
+///
+/// A list of named [`CheckResult`] rows (PASS/FAIL with actual vs target strings).
 pub fn build_checks(scenario: &ScenarioConfig, summary: &ScenarioSummary) -> Vec<CheckResult> {
     let t: &Thresholds = &scenario.thresholds;
     let processing_total_for_ingest_check = summary
@@ -247,6 +268,18 @@ pub fn build_checks(scenario: &ScenarioConfig, summary: &ScenarioSummary) -> Vec
     checks
 }
 
+/// Writes a human-readable Markdown report for one scenario run.
+///
+/// # Arguments
+///
+/// * `summary` — Numeric rollup shown in the digest.
+/// * `checks` — Pass/fail table body.
+/// * `out_path` — Destination `.md` file.
+/// * `scenario_id` — Title fragment.
+///
+/// # Returns
+///
+/// `Ok(())` or `Err` on I/O failure.
 pub fn write_markdown_digest(
     summary: &ScenarioSummary,
     checks: &[CheckResult],
@@ -311,6 +344,16 @@ pub fn write_markdown_digest(
     std::fs::write(&out_path, md).map_err(|e| format!("write {}: {e}", out_path.display()))
 }
 
+/// Safe division `a/b`, returning `0.0` when the divisor is non-positive.
+///
+/// # Arguments
+///
+/// * `a` — Numerator.
+/// * `b` — Denominator.
+///
+/// # Returns
+///
+/// Ratio or `0.0`.
 fn ratio(a: f64, b: f64) -> f64 {
     if b <= 0.0 {
         0.0
@@ -319,6 +362,15 @@ fn ratio(a: f64, b: f64) -> f64 {
     }
 }
 
+/// Arithmetic mean of `u64` values.
+///
+/// # Arguments
+///
+/// * `v` — Sample slice (may be empty).
+///
+/// # Returns
+///
+/// Mean as `f64`, or `0.0` when `v` is empty.
 fn average_u64(v: &[u64]) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -326,6 +378,15 @@ fn average_u64(v: &[u64]) -> f64 {
     v.iter().sum::<u64>() as f64 / v.len() as f64
 }
 
+/// Arithmetic mean of `f64` values.
+///
+/// # Arguments
+///
+/// * `v` — Sample slice (may be empty).
+///
+/// # Returns
+///
+/// Mean, or `0.0` when `v` is empty.
 fn average_f64(v: &[f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -333,6 +394,16 @@ fn average_f64(v: &[f64]) -> f64 {
     v.iter().sum::<f64>() / v.len() as f64
 }
 
+/// Nearest-rank percentile on a sorted copy of `v`.
+///
+/// # Arguments
+///
+/// * `v` — Data (may be empty).
+/// * `p` — Percentile in `[0, 100]`.
+///
+/// # Returns
+///
+/// Sample value at the computed rank, or `0.0` when `v` is empty.
 fn percentile_u64(v: &[u64], p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -343,6 +414,16 @@ fn percentile_u64(v: &[u64], p: f64) -> f64 {
     s[idx] as f64
 }
 
+/// Nearest-rank percentile for `f64` samples (sorts a copy).
+///
+/// # Arguments
+///
+/// * `v` — Data (may be empty).
+/// * `p` — Percentile in `[0, 100]`.
+///
+/// # Returns
+///
+/// Interpolated order-statistic element, or `0.0` when `v` is empty.
 fn percentile_f64(v: &[f64], p: f64) -> f64 {
     if v.is_empty() {
         return 0.0;
@@ -353,6 +434,15 @@ fn percentile_f64(v: &[f64], p: f64) -> f64 {
     s[idx]
 }
 
+/// Population standard deviation of `v`.
+///
+/// # Arguments
+///
+/// * `v` — Sample slice (may be empty).
+///
+/// # Returns
+///
+/// `sqrt(variance)` with population denominator `n`, or `0.0` when `v` is empty.
 fn stddev_f64(v: &[f64]) -> f64 {
     if v.is_empty() {
         return 0.0;

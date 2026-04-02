@@ -26,6 +26,19 @@ pub struct AggregationEngine {
 }
 
 impl AggregationEngine {
+    /// Creates an engine without starting worker threads yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` — Shared ingress queue from [`crate::sensor_buffer::SharedBuffer`].
+    /// * `storage` — Sink for finalized [`AggregatedFrame`] values.
+    /// * `window_duration` — Time span of each aggregation bucket.
+    /// * `num_workers` — Number of concurrent pop/compute threads.
+    /// * `anomaly_threshold` — Multiplier of σ for deviation anomalies.
+    ///
+    /// # Returns
+    ///
+    /// New [`AggregationEngine`] with `shutdown` flag cleared.
     pub fn new(
         buffer: Arc<SharedBuffer>,
         storage: Arc<DataStorage>,
@@ -45,6 +58,15 @@ impl AggregationEngine {
         }
     }
 
+    /// Spawns `num_workers` threads that dequeue readings, bucket by time window, and flush frames.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Engine with configured workers count and thresholds.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn start(&mut self) {
         let window_ms = self.window_duration.as_millis().max(1) as u64;
         let grace_ms = std::cmp::max(50, window_ms / 2);
@@ -141,6 +163,15 @@ impl AggregationEngine {
         }
     }
 
+    /// Signals workers to exit after draining pending work, then joins all handles.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Engine with running workers.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         while let Some(handle) = self.worker_handles.pop() {
@@ -148,6 +179,15 @@ impl AggregationEngine {
         }
     }
 
+    /// Aggregates scalar summaries (min/max/mean/stddev) from heterogeneous readings.
+    ///
+    /// # Arguments
+    ///
+    /// * `readings` — Samples for one sensor in one time window.
+    ///
+    /// # Returns
+    ///
+    /// [`SensorStats`] with `count == 0` producing zeros for derived fields.
     fn compute_stats(readings: &[SensorReading]) -> SensorStats {
         let mut count = 0usize;
         let mut min = f32::MAX;
@@ -195,6 +235,19 @@ impl AggregationEngine {
         }
     }
 
+    /// Appends z-score style anomalies when `|value - mean| > threshold * stddev`.
+    ///
+    /// # Arguments
+    ///
+    /// * `sensor_id` — Source sensor name.
+    /// * `readings` — Raw samples to scan.
+    /// * `stats` — Precomputed [`SensorStats`] for the same slice.
+    /// * `threshold` — Sigma multiplier from engine configuration.
+    /// * `anomalies` — Output list to extend.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     fn detect_anomalies(
         sensor_id: &str,
         readings: &[SensorReading],
@@ -225,6 +278,11 @@ impl AggregationEngine {
     }
 }
 
+/// Wall-clock milliseconds since Unix epoch for window-close decisions.
+///
+/// # Returns
+///
+/// Milliseconds as `u64` (zero on clock error).
 fn system_now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -233,6 +291,19 @@ fn system_now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Builds one [`AggregatedFrame`] from per-sensor reading batches for a closed window.
+///
+/// # Arguments
+///
+/// * `frame_id` — Monotonic id assigned when the window is claimed.
+/// * `window_start` / `window_end` — Inclusive/exclusive-ish window bounds in epoch ms.
+/// * `readings_by_sensor` — All samples grouped by sensor id.
+/// * `threshold` — Anomaly detection sigma multiplier.
+/// * `storage` — Retained for API symmetry with callers (currently unused).
+///
+/// # Returns
+///
+/// Fully populated [`AggregatedFrame`] ready for [`DataStorage::write`].
 fn make_frame(
     frame_id: u64,
     window_start: u64,

@@ -11,6 +11,7 @@ use os_lib::queue::*;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+/// Single tri-axial acceleration sample (simulated units).
 #[derive(Clone, Copy, Debug)]
 pub struct AccelReading {
     pub acceleration_x: f32,
@@ -20,6 +21,7 @@ pub struct AccelReading {
 
 const MAX_QUEUE_SIZE: usize = 128;
 
+/// Simulated accelerometer enqueueing [`AccelReading`] at `rate_per_sec`.
 pub struct Accelerometer {
     id: String,
     rate_per_sec: u32,
@@ -34,6 +36,15 @@ pub struct Accelerometer {
 }
 
 impl Accelerometer {
+    /// Spawns the producer thread once; see [`Thermometer::start_thread`] for semantics.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Accelerometer state with writer available.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn start_thread(&mut self) {
         if self.handle.is_some() {
             return;
@@ -69,6 +80,15 @@ impl Accelerometer {
         }));
     }
 
+    /// Stops the producer and reclaims the writer; see [`Thermometer::stop`].
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Accelerometer with optional active handle.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -81,6 +101,7 @@ impl Accelerometer {
 impl Sensor for Accelerometer {
     type SensorReading = AccelReading;
 
+    /// See [`Sensor::new`]. Ring capacity `128`, same layout as other simulated sensors.
     fn new(id: String, rate_per_sec: u32) -> Self {
         let mut queue = Box::new(RWRoundQueue::new(MAX_QUEUE_SIZE).unwrap());
         let (reader, writer) = unsafe { queue.as_mut().split() };
@@ -99,26 +120,32 @@ impl Sensor for Accelerometer {
         }
     }
 
+    /// See [`Sensor::start`].
     fn start(&mut self) {
         self.start_thread();
     }
 
+    /// See [`Sensor::read`].
     fn read(&self) -> Option<Self::SensorReading> {
         self.reader.read()
     }
 
+    /// See [`Sensor::available`].
     fn available(&self) -> usize {
         self.reader.len()
     }
 
+    /// See [`Sensor::id`].
     fn id(&self) -> String {
         self.id.clone()
     }
 
+    /// See [`Sensor::stop`].
     fn stop(&mut self) {
         Accelerometer::stop(self);
     }
 
+    /// See [`Sensor::wait_for_data`].
     fn wait_for_data(&self, timeout: Duration) -> bool {
         if self.available() > 0 {
             return true;

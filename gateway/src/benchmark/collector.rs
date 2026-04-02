@@ -66,6 +66,11 @@ pub struct HttpLoadMetrics {
 }
 
 impl Default for HttpLoadMetrics {
+    /// Empty counters and no latency samples.
+    ///
+    /// # Returns
+    ///
+    /// Zeroed [`HttpLoadMetrics`].
     fn default() -> Self {
         Self {
             success: 0,
@@ -88,6 +93,15 @@ pub struct HttpLoadHandle {
 }
 
 impl HttpLoadHandle {
+    /// Stops the worker flag and joins all HTTP client threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Handle returned from [`run_http_load`].
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         for handle in self.join_handles.drain(..) {
@@ -95,6 +109,11 @@ impl HttpLoadHandle {
         }
     }
 
+    /// Clones current counters and latency ring buffer from the mutex.
+    ///
+    /// # Returns
+    ///
+    /// [`HttpLoadMetrics`] snapshot (default if the mutex is poisoned).
     pub fn metrics(&self) -> HttpLoadMetrics {
         self.shared
             .lock()
@@ -102,11 +121,26 @@ impl HttpLoadHandle {
             .unwrap_or_default()
     }
 
+    /// Shared state also updated by [`run_sampling`] for cross-correlation.
+    ///
+    /// # Returns
+    ///
+    /// `Arc<Mutex<HttpLoadMetrics>>` held by workers.
     pub fn metrics_shared(&self) -> Arc<Mutex<HttpLoadMetrics>> {
         Arc::clone(&self.shared)
     }
 }
 
+/// Appends `sample` to `buf`, evicting the oldest entry when at [`MAX_HTTP_LATENCY_SAMPLES`].
+///
+/// # Arguments
+///
+/// * `buf` — FIFO latency store.
+/// * `sample` — Observed latency in microseconds.
+///
+/// # Returns
+///
+/// `()`.
 fn push_latency_sample(buf: &mut VecDeque<u64>, sample: u64) {
     if buf.len() < MAX_HTTP_LATENCY_SAMPLES {
         buf.push_back(sample);
@@ -116,7 +150,20 @@ fn push_latency_sample(buf: &mut VecDeque<u64>, sample: u64) {
     }
 }
 
-/// `paths` must be non-empty. Workers round-robin across paths with an atomic counter.
+/// Spawns `concurrency` blocking HTTP GET workers against `base_url` + path round-robin.
+///
+/// # Arguments
+///
+/// * `base_url` — Dashboard origin without trailing slash.
+/// * `paths` — Non-empty list of absolute paths (`"/api/..."`); must not be empty (panics in debug).
+/// * `concurrency` — Number of OS threads issuing requests until stopped.
+/// * `timeout_ms` — Per-request client timeout.
+///
+/// # Returns
+///
+/// [`HttpLoadHandle`] to stop or inspect metrics.
+///
+/// Workers round-robin across `paths` with an atomic counter.
 pub fn run_http_load(
     base_url: String,
     paths: Vec<String>,
@@ -183,6 +230,18 @@ pub fn run_http_load(
     }
 }
 
+/// Polls dashboard REST endpoints for the configured phase durations and appends CSV rows.
+///
+/// # Arguments
+///
+/// * `cfg` — Timing, URL, and scenario id.
+/// * `gateway_pid` — Linux PID for `/proc`-based CPU sampling.
+/// * `csv_path` — Output file for raw samples.
+/// * `http_metrics_shared` — Optional shared HTTP load metrics for serving RPS correlation.
+///
+/// # Returns
+///
+/// `Ok(SamplingResult)` with in-memory rows and optional range-based reading totals.
 pub fn run_sampling(
     cfg: SamplingConfig,
     gateway_pid: u32,
@@ -355,6 +414,16 @@ pub fn run_sampling(
     })
 }
 
+/// Sums `SensorStats.count` across frames returned by `/api/range` for `[from, to]`.
+///
+/// # Arguments
+///
+/// * `base_url` — Dashboard origin.
+/// * `measure_min_we` / `measure_max_we` — Min/max `window_end` observed during measure phase (both needed).
+///
+/// # Returns
+///
+/// `Some(total)` on success, `None` if inputs are incomplete or the request fails.
 fn fetch_range_reading_total(
     base_url: &str,
     measure_min_we: Option<u64>,
@@ -391,6 +460,18 @@ fn fetch_range_reading_total(
     Some(total)
 }
 
+/// Performs `GET base_url + endpoint` and deserializes JSON as `T`.
+///
+/// # Arguments
+///
+/// * `client` — Blocking `reqwest` client.
+/// * `base_url` — Origin without trailing slash.
+/// * `endpoint` — Path beginning with `/`.
+/// * `_gateway_pid` — Reserved for future correlation (unused).
+///
+/// # Returns
+///
+/// `Ok(T)` or `Err` with a short diagnostic string.
 fn fetch_json<T: serde::de::DeserializeOwned>(
     client: &reqwest::blocking::Client,
     base_url: &str,
@@ -418,6 +499,15 @@ struct CpuSampler {
 }
 
 impl CpuSampler {
+    /// Captures initial jiffies for `pid` and for the global CPU line.
+    ///
+    /// # Arguments
+    ///
+    /// * `pid` — Linux process id of the gateway.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(CpuSampler)` or `Err` if `/proc` cannot be read.
     fn new(pid: u32) -> Result<Self, String> {
         let proc = read_proc_jiffies(pid)?;
         let total = read_total_jiffies()?;
@@ -428,6 +518,15 @@ impl CpuSampler {
         })
     }
 
+    /// Computes CPU percent for `pid` since the previous call (or construction).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Sampler holding the last jiffies snapshot.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(percentage)` in `[0, 100]` scaled by jiffies delta, or `Err` on parse failure.
     fn sample(&mut self) -> Result<f64, String> {
         let cur_proc = read_proc_jiffies(self.pid)?;
         let cur_total = read_total_jiffies()?;
@@ -443,6 +542,15 @@ impl CpuSampler {
     }
 }
 
+/// Reads `utime + stime` jiffies for `pid` from `/proc/<pid>/stat`.
+///
+/// # Arguments
+///
+/// * `pid` — Target process.
+///
+/// # Returns
+///
+/// Combined jiffies or `Err` on parse errors.
 fn read_proc_jiffies(pid: u32) -> Result<u64, String> {
     let path = format!("/proc/{pid}/stat");
     let content = std::fs::read_to_string(&path).map_err(|e| format!("read {path}: {e}"))?;
@@ -460,6 +568,11 @@ fn read_proc_jiffies(pid: u32) -> Result<u64, String> {
     Ok(utime + stime)
 }
 
+/// Sums all CPU fields on the first `cpu` line of `/proc/stat`.
+///
+/// # Returns
+///
+/// Total jiffies across cores, or `Err` if the file format is unexpected.
 fn read_total_jiffies() -> Result<u64, String> {
     let content = std::fs::read_to_string("/proc/stat").map_err(|e| format!("read /proc/stat: {e}"))?;
     let first = content
@@ -478,6 +591,11 @@ fn read_total_jiffies() -> Result<u64, String> {
     Ok(sum)
 }
 
+/// Wall-clock milliseconds since Unix epoch.
+///
+/// # Returns
+///
+/// `u64` suitable for sample timestamps.
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

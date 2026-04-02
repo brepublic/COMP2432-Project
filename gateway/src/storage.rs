@@ -12,15 +12,32 @@ pub struct DataStorage {
 }
 
 impl DataStorage {
+    /// Ensures `base_path` exists on disk, then returns a handle for frame writes.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_path` — Directory for `frame_*.json` files (created if missing).
+    ///
+    /// # Returns
+    ///
+    /// New [`DataStorage`]. Panics if the directory cannot be created.
     pub fn new(base_path: PathBuf) -> Self {
         std::fs::create_dir_all(&base_path).expect("Failed to create data directory");
         Self { base_path }
     }
 
-    /// Write one aggregated frame as an atomic file update.
+    /// Persists one aggregated frame as JSON via write-to-temp, `sync_all`, then `rename`.
     ///
-    /// We write to a temp file, call `sync_all()`, then atomically `rename()` to the final name.
-    /// This guarantees the web server never reads partially written content.
+    /// # Arguments
+    ///
+    /// * `self` — Storage handle.
+    /// * `frame` — Aggregated window to serialize; a clone is sent to the dashboard cache.
+    ///
+    /// # Returns
+    ///
+    /// `()`. Panics on I/O or serialization errors.
+    ///
+    /// This guarantees readers never observe partial JSON.
     pub fn write(&self, frame: AggregatedFrame) {
         let for_dashboard = frame.clone();
         let final_name = format!("frame_{}_{}.json", frame.window_end, frame.frame_id);

@@ -12,6 +12,7 @@ use os_lib::queue::*;
 use std::sync::atomic::{AtomicU64};
 use std::time::Duration;
 
+/// Single temperature sample in degrees Celsius.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoReading {
     pub temperature_celsius: f32,
@@ -19,6 +20,7 @@ pub struct ThermoReading {
 
 const MAX_QUEUE_SIZE: usize = 128;
 
+/// Simulated thermometer: background thread enqueues [`ThermoReading`] values at `rate_per_sec`.
 pub struct Thermometer {
     id: String,
     rate_per_sec: u32,
@@ -33,6 +35,15 @@ pub struct Thermometer {
 }
 
 impl Thermometer {
+    /// Spawns the producer thread if not already running; no-op when a handle already exists.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Thermometer with `writer` still present (must not call `start` twice without `stop`).
+    ///
+    /// # Returns
+    ///
+    /// `()`. Panics if `start` was called twice without restoring `writer` via `stop`.
     pub fn start_thread(&mut self) {
         // Test whether handle already exists
         if self.handle.is_some() {
@@ -69,6 +80,15 @@ impl Thermometer {
         }));
     }
 
+    /// Signals the producer to exit and joins it, putting the [`QueueWriter`] back in `self`.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Thermometer with an active producer handle, if any.
+    ///
+    /// # Returns
+    ///
+    /// `()`. Panics if the thread panicked while joining.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -81,7 +101,7 @@ impl Thermometer {
 impl Sensor for Thermometer {
     type SensorReading = ThermoReading;
 
-    /// Create a new mock sensor with ID and generation rate
+    /// See [`Sensor::new`]. Allocates a `128`-slot ring and splits reader/writer handles.
     fn new(id: String, rate_per_sec: u32) -> Self {
         // Fix: keep the queue at a stable address before splitting. Previously we
         // split and then moved the queue into the struct, which invalidated the
@@ -103,33 +123,32 @@ impl Sensor for Thermometer {
         }
     }
 
-    /// Create a new mock sensor with ID and generation rate
+    /// See [`Sensor::start`]. Delegates to [`Thermometer::start_thread`].
     fn start(&mut self) {
         self.start_thread();
     }
 
-    /// Read one reading from the sensor's buffer
-    /// Returns None if buffer is empty
+    /// See [`Sensor::read`]. Reads from the internal [`QueueReader`].
     fn read(&self) -> Option<Self::SensorReading> {
         self.reader.read()
     }
 
-    /// Get number of unread items in sensor's buffer
-    /// If this reaches the upper limit, data loss occurs!
+    /// See [`Sensor::available`]. Uses reader-side queue length.
     fn available(&self) -> usize {
         self.reader.len()
     }
 
-    /// Get sensor identifier
+    /// See [`Sensor::id`].
     fn id(&self) -> String {
         self.id.clone()
     }
 
-    /// Stop data generation
+    /// See [`Sensor::stop`]. Calls [`Thermometer::stop`].
     fn stop(&mut self) {
         Thermometer::stop(self);
     }
 
+    /// See [`Sensor::wait_for_data`]. Uses a condition variable when the buffer is empty.
     fn wait_for_data(&self, timeout: Duration) -> bool {
         if self.available() > 0 {
             return true;
@@ -157,6 +176,16 @@ mod tests {
     }
 
     impl SensorGuard {
+        /// Wraps a [`Thermometer`] for tests and stops it on drop.
+        ///
+        /// # Arguments
+        ///
+        /// * `id` — Sensor id string.
+        /// * `rate_per_sec` — Producer rate passed to [`Sensor::new`].
+        ///
+        /// # Returns
+        ///
+        /// Guard owning the sensor.
         fn new(id: &str, rate_per_sec: u32) -> Self {
             Self {
                 sensor: Thermometer::new(id.to_string(), rate_per_sec),
@@ -165,11 +194,26 @@ mod tests {
     }
 
     impl Drop for SensorGuard {
+        /// Ensures [`Thermometer::stop`] runs so test threads do not leak.
+        ///
+        /// # Returns
+        ///
+        /// `()`.
         fn drop(&mut self) {
             self.sensor.stop();
         }
     }
 
+    /// Polls `sensor.read()` until a value appears or `timeout_ms` elapses.
+    ///
+    /// # Arguments
+    ///
+    /// * `sensor` — Started or stopped thermometer under test.
+    /// * `timeout_ms` — Wall-clock budget for polling.
+    ///
+    /// # Returns
+    ///
+    /// `Some(reading)` or `None` on timeout.
     fn wait_for_reading(sensor: &Thermometer, timeout_ms: u64) -> Option<ThermoReading> {
         let start = std::time::Instant::now();
         while start.elapsed() < Duration::from_millis(timeout_ms) {

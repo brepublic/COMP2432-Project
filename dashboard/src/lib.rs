@@ -1,3 +1,8 @@
+//! Salvo HTTP dashboard: serves HTML templates and JSON APIs over aggregated sensor frames.
+//!
+//! Telemetry from the gateway is injected via [`set_buffer_telemetry`], [`set_throughput_telemetry`],
+//! and [`record_aggregated_frame`].
+
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, BTreeSet, HashMap};
 use std::fs::File;
@@ -47,6 +52,11 @@ struct FramesCacheState {
 }
 
 impl Default for FramesCacheState {
+    /// Empty cache, not refreshing, fresh notify handle.
+    ///
+    /// # Returns
+    ///
+    /// Default [`FramesCacheState`].
     fn default() -> Self {
         Self {
             refreshed_at_ms: 0,
@@ -58,6 +68,16 @@ impl Default for FramesCacheState {
     }
 }
 
+/// Upserts `frame` into `frames` by `(window_end, frame_id)`, keeps sorted order, trims to [`MAX_CACHED_FRAMES`].
+///
+/// # Arguments
+///
+/// * `frames` — In-memory cache vector.
+/// * `frame` — New or updated frame.
+///
+/// # Returns
+///
+/// `()`.
 fn merge_frame_into_vec(frames: &mut Vec<AggregatedFrame>, frame: AggregatedFrame) {
     frames.retain(|f| f.window_end != frame.window_end || f.frame_id != frame.frame_id);
     frames.push(frame);
@@ -72,7 +92,15 @@ fn merge_frame_into_vec(frames: &mut Vec<AggregatedFrame>, frame: AggregatedFram
     }
 }
 
-/// Called from the gateway after each frame is persisted so the dashboard can update without a full disk scan.
+/// Merges a freshly written frame into the in-memory cache (or queues it while disk refresh runs).
+///
+/// # Arguments
+///
+/// * `frame` — Same payload the gateway just persisted.
+///
+/// # Returns
+///
+/// `()`. Notifies waiters when the cache is updated immediately.
 pub fn record_aggregated_frame(frame: AggregatedFrame) {
     let notify = {
         let Ok(mut cache) = frames_cache_store().lock() else {
@@ -92,22 +120,47 @@ pub fn record_aggregated_frame(frame: AggregatedFrame) {
     }
 }
 
+/// Lazy static holding the latest buffer telemetry from the gateway.
+///
+/// # Returns
+///
+/// `&'static RwLock<Option<BufferTelemetrySnapshot>>`.
 fn buffer_store() -> &'static RwLock<Option<BufferTelemetrySnapshot>> {
     BUFFER_TELEMETRY.get_or_init(|| RwLock::new(None))
 }
 
+/// Tokio notify used for long-poll shutdown watchers.
+///
+/// # Returns
+///
+/// `&'static Notify`.
 fn shutdown_notify() -> &'static Notify {
     SHUTDOWN_NOTIFY.get_or_init(Notify::new)
 }
 
+/// Lazy static for central-buffer throughput stats.
+///
+/// # Returns
+///
+/// `&'static RwLock<Option<ThroughputTelemetrySnapshot>>`.
 fn throughput_store() -> &'static RwLock<Option<ThroughputTelemetrySnapshot>> {
     THROUGHPUT_TELEMETRY.get_or_init(|| RwLock::new(None))
 }
 
+/// Mutex-protected frame cache shared by API handlers and [`record_aggregated_frame`].
+///
+/// # Returns
+///
+/// `&'static Mutex<FramesCacheState>`.
 fn frames_cache_store() -> &'static Mutex<FramesCacheState> {
     FRAMES_CACHE.get_or_init(|| Mutex::new(FramesCacheState::default()))
 }
 
+/// Monotonic wall clock in milliseconds (falls back to zero duration on error).
+///
+/// # Returns
+///
+/// `u64` ms since Unix epoch.
 fn now_millis() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -116,13 +169,31 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Replaces the latest buffer telemetry snapshot (thread-safe, best-effort on poison).
+///
+/// # Arguments
+///
+/// * `snapshot` — Per-sensor internal buffer view from the gateway.
+///
+/// # Returns
+///
+/// `()`.
 pub fn set_buffer_telemetry(snapshot: BufferTelemetrySnapshot) {
     if let Ok(mut guard) = buffer_store().write() {
         *guard = Some(snapshot);
     }
 }
 
-/// Must be called before `run` (e.g. from the gateway) so `/api/buffer` uses correct capacity and ratio.
+/// Configures assumed per-sensor ring usable capacity and “near full” ratio for `/api/buffer` merging.
+///
+/// # Arguments
+///
+/// * `usable_capacity` — Effective queue depth (e.g. 127 for a 128-slot ring).
+/// * `near_full_ratio` — Utilization threshold for warnings, in `[0, 1]`.
+///
+/// # Returns
+///
+/// `()`. Should be called before [`run`].
 pub fn set_internal_buffer_policy(usable_capacity: usize, near_full_ratio: f64) {
     let _ = INTERNAL_BUFFER_POLICY.set(InternalBufferPolicy {
         usable_capacity,
@@ -130,6 +201,11 @@ pub fn set_internal_buffer_policy(usable_capacity: usize, near_full_ratio: f64) 
     });
 }
 
+/// Reads the policy set via [`set_internal_buffer_policy`] or sane defaults.
+///
+/// # Returns
+///
+/// [`InternalBufferPolicy`] copy.
 fn internal_buffer_policy() -> InternalBufferPolicy {
     INTERNAL_BUFFER_POLICY.get().copied().unwrap_or(InternalBufferPolicy {
         usable_capacity: 127,
@@ -137,6 +213,18 @@ fn internal_buffer_policy() -> InternalBufferPolicy {
     })
 }
 
+/// Enriches live buffer telemetry with peak depths observed in persisted `frames`.
+///
+/// # Arguments
+///
+/// * `base` — Live snapshot from the gateway.
+/// * `frames` — Disk-backed frames used to recover historical internal-buffer peaks.
+/// * `capacity` — Per-sensor usable capacity for ratio math.
+/// * `near_full_ratio` — Warning threshold.
+///
+/// # Returns
+///
+/// Merged [`BufferTelemetrySnapshot`] with sorted sensors and warning strings.
 fn merge_buffer_telemetry_with_frames(
     base: BufferTelemetrySnapshot,
     frames: &[AggregatedFrame],
@@ -229,12 +317,26 @@ fn merge_buffer_telemetry_with_frames(
     }
 }
 
+/// Stores central shared-buffer throughput counters for `/api/throughput`.
+///
+/// # Arguments
+///
+/// * `snapshot` — Gateway-computed rates and totals.
+///
+/// # Returns
+///
+/// `()`.
 pub fn set_throughput_telemetry(snapshot: ThroughputTelemetrySnapshot) {
     if let Ok(mut guard) = throughput_store().write() {
         *guard = Some(snapshot);
     }
 }
 
+/// Triggers graceful HTTP shutdown: notifies browsers, then stops Salvo after a short delay.
+///
+/// # Returns
+///
+/// `()`; idempotent after the first call.
 pub fn request_shutdown() {
     // Ensure shutdown path only runs once.
     if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
@@ -269,15 +371,30 @@ struct SensorLiveView {
     anomalies: Vec<Anomaly>,
 }
 
-/// Ordering for sort: newer frames first (higher `window_end`, then higher `frame_id`).
+/// Comparator: newer frames first (higher `window_end`, then higher `frame_id`).
+///
+/// # Arguments
+///
+/// * `a`, `b` — Frames to compare.
+///
+/// # Returns
+///
+/// [`std::cmp::Ordering`] for descending recency.
 fn cmp_latest_desc(a: &AggregatedFrame, b: &AggregatedFrame) -> std::cmp::Ordering {
     b.window_end
         .cmp(&a.window_end)
         .then_with(|| b.frame_id.cmp(&a.frame_id))
 }
 
-/// Same result as sorting all frames with `cmp_latest_desc` and taking the first `MAX_LATEST_FRAMES`,
-/// without full sort when `frames.len()` is large.
+/// Selects up to [`MAX_LATEST_FRAMES`] newest frames without sorting the full slice when large.
+///
+/// # Arguments
+///
+/// * `frames` — Full cached or loaded frame list.
+///
+/// # Returns
+///
+/// Newest-first vector of length `min(MAX_LATEST_FRAMES, frames.len())`.
 fn newest_frames_bounded(frames: &[AggregatedFrame]) -> Vec<AggregatedFrame> {
     if frames.is_empty() {
         return Vec::new();
@@ -309,6 +426,11 @@ fn newest_frames_bounded(frames: &[AggregatedFrame]) -> Vec<AggregatedFrame> {
     out
 }
 
+/// Reads every `*.json` in [`DATA_DIR`], each line as one [`AggregatedFrame`].
+///
+/// # Returns
+///
+/// All successfully parsed frames, sorted by file path order (not by time).
 fn load_all_frames() -> Vec<AggregatedFrame> {
     let base = PathBuf::from(DATA_DIR);
     let entries = match std::fs::read_dir(&base) {
@@ -338,6 +460,15 @@ fn load_all_frames() -> Vec<AggregatedFrame> {
     frames
 }
 
+/// Drains pending pushes into `refreshed_frames`, swaps the cache, clears the `refreshing` flag.
+///
+/// # Arguments
+///
+/// * `refreshed_frames` — Result of a blocking disk load (mutated in place).
+///
+/// # Returns
+///
+/// `Some(notify)` to wake waiters, or `None` if the cache mutex is poisoned.
 fn apply_disk_refresh_to_cache(refreshed_frames: &mut Vec<AggregatedFrame>) -> Option<Arc<Notify>> {
     let Ok(mut cache) = frames_cache_store().lock() else {
         return None;
@@ -359,6 +490,11 @@ enum FramesLoadDecision {
     ReturnStaleStartBg(Vec<AggregatedFrame>),
 }
 
+/// Returns the full cached frame list, refreshing from disk on TTL / miss via blocking pool.
+///
+/// # Returns
+///
+/// `Vec<AggregatedFrame>` (possibly stale briefly while a background refresh runs).
 async fn load_all_frames_on_pool() -> Vec<AggregatedFrame> {
     loop {
         let decision = {
@@ -432,6 +568,11 @@ async fn load_all_frames_on_pool() -> Vec<AggregatedFrame> {
     }
 }
 
+/// Like [`load_all_frames_on_pool`] but applies [`newest_frames_bounded`] for `/api/latest`.
+///
+/// # Returns
+///
+/// At most [`MAX_LATEST_FRAMES`] newest frames.
 async fn load_latest_frames_for_api() -> Vec<AggregatedFrame> {
     loop {
         let decision = {
@@ -503,6 +644,15 @@ async fn load_latest_frames_for_api() -> Vec<AggregatedFrame> {
     }
 }
 
+/// Loads `templates/{name}` from disk via [`resource::locate_resource`].
+///
+/// # Arguments
+///
+/// * `name` — File name inside the templates directory.
+///
+/// # Returns
+///
+/// File contents or an HTML comment placeholder on error / missing file.
 fn load_template_sync(name: &str) -> String {
     let rel_path = format!("templates/{}", name);
     match resource::locate_resource(&rel_path) {
@@ -512,6 +662,15 @@ fn load_template_sync(name: &str) -> String {
     }
 }
 
+/// Injects a shutdown polling script before `</body>` (or appends if missing).
+///
+/// # Arguments
+///
+/// * `html` — Full HTML document string.
+///
+/// # Returns
+///
+/// Updated HTML `String`.
 fn inject_shutdown_watcher(mut html: String) -> String {
     let script = r#"
 <script>
@@ -576,6 +735,15 @@ fn inject_shutdown_watcher(mut html: String) -> String {
     }
 }
 
+/// Async wrapper: reads template on the blocking pool then injects the shutdown script.
+///
+/// # Arguments
+///
+/// * `name` — Template file name (`'static` for spawned task lifetime).
+///
+/// # Returns
+///
+/// Final HTML string for Salvo [`Text::Html`].
 async fn load_template(name: &'static str) -> String {
     // Template reading is blocking IO; keep it off async executor threads.
     let html = tokio::task::spawn_blocking(move || load_template_sync(name))
@@ -584,24 +752,48 @@ async fn load_template(name: &'static str) -> String {
     inject_shutdown_watcher(html)
 }
 
+/// `GET /` — main dashboard HTML.
+///
+/// # Returns
+///
+/// [`Text::Html`] for `index.html`.
 #[handler]
 async fn root() -> Text<String> {
     let html = load_template("index.html").await;
     Text::Html(html)
 }
 
+/// `GET /latest` — latest frames page.
+///
+/// # Returns
+///
+/// [`Text::Html`].
 #[handler]
 async fn latest_page() -> Text<String> {
     let html = load_template("latest.html").await;
     Text::Html(html)
 }
 
+/// `GET /stats` — aggregate stats page.
+///
+/// # Returns
+///
+/// [`Text::Html`].
 #[handler]
 async fn stats_page() -> Text<String> {
     let html = load_template("stats.html").await;
     Text::Html(html)
 }
 
+/// `GET /sensor/{id}` — single-sensor detail page (template only; data via API).
+///
+/// # Arguments
+///
+/// * `req` — Salvo request (path param unused at render time).
+///
+/// # Returns
+///
+/// [`Text::Html`].
 #[handler]
 async fn sensor_page(req: &mut Request) -> Text<String> {
     let _ = req;
@@ -609,23 +801,43 @@ async fn sensor_page(req: &mut Request) -> Text<String> {
     Text::Html(html)
 }
 
+/// `GET /sensor` — sensor index HTML.
+///
+/// # Returns
+///
+/// [`Text::Html`].
 #[handler]
 async fn sensor_index_page() -> Text<String> {
     let html = load_template("sensor_index.html").await;
     Text::Html(html)
 }
 
+/// `GET /shutdown` — shutdown notice page.
+///
+/// # Returns
+///
+/// [`Text::Html`].
 #[handler]
 async fn shutdown_page() -> Text<String> {
     let html = load_template("shutdown.html").await;
     Text::Html(html)
 }
 
+/// `GET /api/latest` — bounded newest frames JSON.
+///
+/// # Returns
+///
+/// [`Json`] wrapping at most [`MAX_LATEST_FRAMES`] frames.
 #[handler]
 async fn latest_api() -> Json<Vec<AggregatedFrame>> {
     Json(load_latest_frames_for_api().await)
 }
 
+/// `GET /api/stats` — rolled-up counters across all loaded frames.
+///
+/// # Returns
+///
+/// [`Json<SystemStats>`].
 #[handler]
 async fn stats_api() -> Json<SystemStats> {
     let frames = load_all_frames_on_pool().await;
@@ -649,6 +861,15 @@ async fn stats_api() -> Json<SystemStats> {
     })
 }
 
+/// `GET /api/sensor/{id}` — latest stats and anomalies for one sensor.
+///
+/// # Arguments
+///
+/// * `req` — Must include path param `id` (defaults to `"unknown"` if missing).
+///
+/// # Returns
+///
+/// [`Json<SensorLiveView>`].
 #[handler]
 async fn sensor_api(req: &mut Request) -> Json<SensorLiveView> {
     let sensor_id = req
@@ -695,6 +916,15 @@ async fn sensor_api(req: &mut Request) -> Json<SensorLiveView> {
     }
 }
 
+/// `GET /api/range?from=&to=` — frames whose `window_end` lies in `[from, to]` (ms).
+///
+/// # Arguments
+///
+/// * `req` — Query params `from` / `to` (`u64`, default `0` / `u64::MAX`).
+///
+/// # Returns
+///
+/// [`Json<Vec<AggregatedFrame>>`] sorted newest-first.
 #[handler]
 async fn range_api(req: &mut Request) -> Json<Vec<AggregatedFrame>> {
     // Query params: from/to are window timestamps in millis.
@@ -709,6 +939,11 @@ async fn range_api(req: &mut Request) -> Json<Vec<AggregatedFrame>> {
     Json(frames)
 }
 
+/// `GET /api/buffer` — merged live + disk-peak internal buffer telemetry.
+///
+/// # Returns
+///
+/// [`Json<BufferTelemetrySnapshot>`].
 #[handler]
 async fn buffer_api() -> Json<BufferTelemetrySnapshot> {
     let empty = BufferTelemetrySnapshot {
@@ -741,6 +976,11 @@ async fn buffer_api() -> Json<BufferTelemetrySnapshot> {
     Json(merged)
 }
 
+/// `GET /api/throughput` — central shared-buffer counters from the gateway.
+///
+/// # Returns
+///
+/// [`Json<ThroughputTelemetrySnapshot>`] (zeros if unset).
 #[handler]
 async fn throughput_api() -> Json<ThroughputTelemetrySnapshot> {
     let snapshot = if let Ok(guard) = throughput_store().read() {
@@ -779,6 +1019,11 @@ struct ShutdownWatchResponse {
     message: String,
 }
 
+/// `POST /api/shutdown` — triggers [`request_shutdown`].
+///
+/// # Returns
+///
+/// [`Json<ShutdownResponse>`] acknowledging the request.
 #[handler]
 async fn shutdown_api() -> Json<ShutdownResponse> {
     request_shutdown();
@@ -788,6 +1033,11 @@ async fn shutdown_api() -> Json<ShutdownResponse> {
     })
 }
 
+/// `GET /api/shutdown/status` — non-blocking shutdown flag for short polling.
+///
+/// # Returns
+///
+/// [`Json<ShutdownWatchResponse>`].
 #[handler]
 async fn shutdown_status_api() -> Json<ShutdownWatchResponse> {
     let shutting_down = SHUTTING_DOWN.load(Ordering::SeqCst);
@@ -801,6 +1051,11 @@ async fn shutdown_status_api() -> Json<ShutdownWatchResponse> {
     })
 }
 
+/// `GET /api/shutdown/watch` — long-poll until shutdown is requested, then respond.
+///
+/// # Returns
+///
+/// [`Json<ShutdownWatchResponse>`] with `shutting_down: true`.
 #[handler]
 async fn shutdown_watch_api() -> Json<ShutdownWatchResponse> {
     if !SHUTTING_DOWN.load(Ordering::SeqCst) {
@@ -812,6 +1067,15 @@ async fn shutdown_watch_api() -> Json<ShutdownWatchResponse> {
     })
 }
 
+/// Binds Salvo on `addr`, registers HTML + JSON routes, and serves until shutdown.
+///
+/// # Arguments
+///
+/// * `addr` — `'static` listener address (e.g. leaked `String` from the gateway).
+///
+/// # Returns
+///
+/// `()` when the server stops (normally after graceful shutdown).
 pub async fn run(addr: &'static str) {
     let api_router = Router::with_path("api")
         .push(Router::with_path("latest").get(latest_api))
@@ -858,6 +1122,15 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    /// Builds a minimal [`AggregatedFrame`] for ordering tests.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame_id`, `window_end` — Keys used by [`cmp_latest_desc`].
+    ///
+    /// # Returns
+    ///
+    /// Frame with empty stats and `window_start = 0`.
     fn make_frame(frame_id: u64, window_end: u64) -> AggregatedFrame {
         AggregatedFrame {
             frame_id,
@@ -870,12 +1143,29 @@ mod tests {
     }
 
     /// Reference: full sort + take, matching pre-optimization `newest_frames` behavior.
+    ///
+    /// # Arguments
+    ///
+    /// * `frames` — Input slice.
+    ///
+    /// # Returns
+    ///
+    /// First [`MAX_LATEST_FRAMES`] items after descending sort.
     fn newest_frames_naive(frames: &[AggregatedFrame]) -> Vec<AggregatedFrame> {
         let mut v = frames.to_vec();
         v.sort_by(|a, b| cmp_latest_desc(a, b));
         v.into_iter().take(MAX_LATEST_FRAMES).collect()
     }
 
+    /// Asserts two latest-frame lists match pairwise by id and window end.
+    ///
+    /// # Arguments
+    ///
+    /// * `a`, `b` — Slices expected to be equal length and element-wise equal on key fields.
+    ///
+    /// # Returns
+    ///
+    /// `()` or panics via `assert_eq!`.
     fn assert_same_latest(a: &[AggregatedFrame], b: &[AggregatedFrame]) {
         assert_eq!(a.len(), b.len(), "len mismatch");
         for (x, y) in a.iter().zip(b.iter()) {

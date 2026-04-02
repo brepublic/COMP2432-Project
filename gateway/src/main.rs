@@ -38,6 +38,11 @@ struct SensorInternalBufferConfig {
 }
 
 impl Default for SensorInternalBufferConfig {
+    /// Default usable ring depth (127 of 128 slots) and 85% “near full” warning ratio.
+    ///
+    /// # Returns
+    ///
+    /// [`SensorInternalBufferConfig`] with workspace-typical values.
     fn default() -> Self {
         Self {
             // sensor_sim ring is 128 slots with one reserved empty slot => 127 usable.
@@ -79,6 +84,11 @@ struct DashboardConfig {
 }
 
 impl Default for DashboardConfig {
+    /// Binds the embedded dashboard to all interfaces on port `5800`.
+    ///
+    /// # Returns
+    ///
+    /// [`DashboardConfig`] with `addr = "0.0.0.0:5800"`.
     fn default() -> Self {
         Self {
             addr: "0.0.0.0:5800".to_string(),
@@ -87,6 +97,11 @@ impl Default for DashboardConfig {
 }
 
 impl Default for GatewayConfig {
+    /// Built-in demo topology: two thermo, two accel, one force, 5000-slot central buffer.
+    ///
+    /// # Returns
+    ///
+    /// [`GatewayConfig`] suitable for local runs without `config.toml`.
     fn default() -> Self {
         Self {
             sensors: SensorsConfig {
@@ -104,6 +119,11 @@ impl Default for GatewayConfig {
     }
 }
 
+/// Loads TOML from `GATEWAY_CONFIG` or `./config.toml`, falling back to [`GatewayConfig::default`] on error.
+///
+/// # Returns
+///
+/// Parsed [`GatewayConfig`] or defaults after printing a warning.
 fn load_gateway_config() -> GatewayConfig {
     let config_path = std::env::var(GATEWAY_CONFIG_ENV).unwrap_or_else(|_| "./config.toml".to_string());
     let cfg_text = match std::fs::read_to_string(&config_path) {
@@ -129,6 +149,11 @@ fn load_gateway_config() -> GatewayConfig {
     }
 }
 
+/// Entry point: wires sensors, aggregation, dashboard thread, and Ctrl-C shutdown.
+///
+/// # Returns
+///
+/// Does not return normally; exits after graceful teardown.
 fn main() {
     // Create an atomic boolean as a global stop flag
     let running = Arc::new(AtomicBool::new(true));

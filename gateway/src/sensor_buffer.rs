@@ -22,6 +22,15 @@ pub enum SensorReading {
 }
 
 impl SensorReading {
+    /// Returns the logical sensor id for this sample.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Any variant of [`SensorReading`].
+    ///
+    /// # Returns
+    ///
+    /// Borrowed string slice pointing into the stored `Arc<str>`.
     pub fn sensor_id(&self) -> &str {
         match self {
             SensorReading::Accel(_, id, _, _) => id,
@@ -30,6 +39,15 @@ impl SensorReading {
         }
     }
 
+    /// Millisecond timestamp attached when the gateway ingested this reading.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Any variant of [`SensorReading`].
+    ///
+    /// # Returns
+    ///
+    /// Unix-epoch millis as recorded at push time.
     pub fn timestamp_millis(&self) -> u64 {
         match self {
             SensorReading::Accel(_, _, ts, _) => *ts,
@@ -38,6 +56,15 @@ impl SensorReading {
         }
     }
 
+    /// Internal per-sensor queue depth observed immediately before this dequeue.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Any variant of [`SensorReading`].
+    ///
+    /// # Returns
+    ///
+    /// Snapshot length passed through from the reader thread.
     pub fn internal_buffer_len(&self) -> usize {
         match self {
             SensorReading::Accel(_, _, _, n) => *n,
@@ -60,6 +87,16 @@ pub struct SharedBuffer {
 }
 
 impl SharedBuffer {
+    /// Creates a new bounded queue wrapped in `Arc` for sharing across threads.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` — Maximum number of [`SensorReading`] values before producers block (or panic if `fail_on_full`).
+    /// * `fail_on_full` — When `true`, [`Self::push`] panics instead of blocking on overflow.
+    ///
+    /// # Returns
+    ///
+    /// Shared [`Arc<SharedBuffer>`] handle.
     pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Arc<Self> {
         Arc::new(Self {
             queue: Mutex::new(VecDeque::with_capacity(capacity)),
@@ -73,7 +110,16 @@ impl SharedBuffer {
         })
     }
 
-    /// Push a reading into the buffer. If the buffer is full, block until space is available.
+    /// Enqueues `reading`, blocking on `not_full` until capacity is available (unless `fail_on_full`).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    /// * `reading` — Unified sample to append.
+    ///
+    /// # Returns
+    ///
+    /// `()`. Panics when full and `fail_on_full` is enabled.
     pub fn push(&self, reading: SensorReading) {
         let mut queue = self.queue.lock().unwrap();
         if self.fail_on_full && queue.len() >= self.capacity {
@@ -93,8 +139,16 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         self.not_empty.notify_one(); // Wake a potential consumer
     }
 
-    /// Pop a reading from the buffer. If the buffer is empty, block until data arrives.
-    /// Pop with timeout. Returns `None` on timeout.
+    /// Dequeues one reading, waiting up to `timeout` when empty.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    /// * `timeout` — Max wait duration for data.
+    ///
+    /// # Returns
+    ///
+    /// `Some(reading)` or `None` on timeout (still empty).
     pub fn pop_timeout(&self, timeout: Duration) -> Option<SensorReading> {
         let mut queue = self.queue.lock().unwrap();
         let result = self.not_empty
@@ -112,23 +166,55 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         }
     }
 
-    /// Wake all producers/consumers blocked on the buffer.
+    /// Notifies every waiter on `not_empty` and `not_full` (used during shutdown).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn wake_all(&self) {
         self.not_empty.notify_all();
         self.not_full.notify_all();
     }
 
-    /// Current queue length.
+    /// Current occupied slots (under mutex).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// Queue length.
     pub fn len(&self) -> usize {
         self.queue.lock().unwrap().len()
     }
 
-    /// Buffer capacity.
+    /// Configured maximum elements.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// Capacity value.
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Total number of readings pushed/popped since start.
+    /// Lifetime push/pop counters (relaxed atomics).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// `(pushed_total, popped_total)`.
     pub fn totals(&self) -> (u64, u64) {
         (
             self.pushed_total.load(Ordering::Relaxed),
@@ -136,6 +222,15 @@ Set a larger capacity, reduce producer rate, or disable fail-fast mode.",
         )
     }
 
+    /// How many times a producer waited because the queue was full.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// Monotonic counter.
     pub fn full_waits_total(&self) -> u64 {
         self.full_waits_total.load(Ordering::Relaxed)
     }
@@ -169,6 +264,16 @@ pub struct BufferUtilizationStats {
 }
 
 impl SensorBufferManager {
+    /// Builds a manager with an empty reader thread list and fresh telemetry state.
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` — Shared buffer capacity (see [`SharedBuffer::new_with_policy`]).
+    /// * `fail_on_full` — Forwarded to the shared buffer.
+    ///
+    /// # Returns
+    ///
+    /// New [`SensorBufferManager`].
     pub fn new_with_policy(capacity: usize, fail_on_full: bool) -> Self {
         Self {
             shared: SharedBuffer::new_with_policy(capacity, fail_on_full),
@@ -180,13 +285,30 @@ impl SensorBufferManager {
         }
     }
 
+    /// Clone of the inner [`SharedBuffer`] for consumers (e.g. aggregation workers).
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Manager.
+    ///
+    /// # Returns
+    ///
+    /// `Arc<SharedBuffer>`.
     pub fn shared(&self) -> Arc<SharedBuffer> {
         self.shared.clone()
     }
 
-    /// Register a sensor (spawns a reader thread).
+    /// Starts `sensor`, then spawns a reader thread that drains it into [`SharedBuffer`].
     ///
-    /// `wrap` converts the sensor reading + id + timestamp + internal buffer depth into `SensorReading`.
+    /// # Arguments
+    ///
+    /// * `self` — Manager.
+    /// * `sensor` — Any [`sensor_sim::traits::Sensor`] implementation (`Send` + `'static`).
+    /// * `wrap` — Maps `(reading, id, ts, internal_len)` into [`SensorReading`].
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn register_sensor<S, Wrap>(&mut self, mut sensor: S, wrap: Wrap)
     where
         S: sensor_sim::traits::Sensor + Send + 'static,
@@ -263,7 +385,15 @@ impl SensorBufferManager {
         self.reader_handles.push(reader_handle);
     }
 
-    /// Get buffer utilization statistics (including rates).
+    /// Computes length, utilization ratio, totals, and per-second push/pop rates since last sample ≥1s.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Manager.
+    ///
+    /// # Returns
+    ///
+    /// [`BufferUtilizationStats`] snapshot for the dashboard.
     pub fn utilization_stats(&self) -> BufferUtilizationStats {
         let len = self.shared.len();
         let capacity = self.shared.capacity();
@@ -309,6 +439,17 @@ impl SensorBufferManager {
         }
     }
 
+    /// Builds per-sensor internal queue telemetry using live snapshots and `per_sensor_capacity`.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Manager.
+    /// * `per_sensor_capacity` — Usable depth of each sensor’s ring (e.g. 127).
+    /// * `near_full_ratio` — Threshold for “near full” warnings (0–1).
+    ///
+    /// # Returns
+    ///
+    /// [`BufferTelemetrySnapshot`] sorted by sensor id.
     pub fn sensor_internal_buffers_snapshot(
         &self,
         per_sensor_capacity: usize,
@@ -371,7 +512,15 @@ impl SensorBufferManager {
         }
     }
 
-    /// Shutdown all reader threads cleanly.
+    /// Clears `running`, wakes blocked threads, and joins all reader handles.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Manager.
+    ///
+    /// # Returns
+    ///
+    /// `()`. Panics if a reader thread panicked.
     pub fn shutdown(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         // Ensure reader threads blocked on full-buffer waits can re-check `running`.
@@ -382,6 +531,11 @@ impl SensorBufferManager {
     }
 }
 
+/// Current time as milliseconds since the Unix epoch (zero duration on clock error).
+///
+/// # Returns
+///
+/// Wall-clock milliseconds as `u64`.
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

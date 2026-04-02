@@ -8,6 +8,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Copies `templates` / `programfiles` into target dirs and regenerates `resource.rs` for asset lookup.
 fn main() {
     // Get current crate's directory
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -119,7 +120,16 @@ fn main() {
     println!("cargo:rerun-if-changed=programfiles");
 }
 
-/// Recursively copies a directory
+/// Recursively copies `src` into `dst`, creating directories as needed.
+///
+/// # Arguments
+///
+/// * `src` — Existing directory tree.
+/// * `dst` — Destination root (created if missing).
+///
+/// # Returns
+///
+/// `Ok(())` or the first I/O error.
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     if !dst.exists() {
         fs::create_dir_all(dst)?;
@@ -140,7 +150,17 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Generate a helper module for finding resources at runtime
+/// Writes `src/resource.rs` with workspace-aware lookup if `is_in_workspace` is true.
+///
+/// # Arguments
+///
+/// * `manifest_dir` — Crate root (`CARGO_MANIFEST_DIR`).
+/// * `_profile_dir` — Reserved (profile output path).
+/// * `is_in_workspace` — Enables workspace-root search branch in generated code.
+///
+/// # Returns
+///
+/// `()`.
 fn generate_resource_locator(manifest_dir: &Path, _profile_dir: &Path, is_in_workspace: bool) {
     // Create src directory if it doesn't exist
     let src_dir = manifest_dir.join("src");
@@ -156,7 +176,15 @@ r#"//! Resource locator module
 
 use std::path::{{Path, PathBuf}};
 
-/// Locate a resource file or directory from any execution context
+/// Resolves `resource_path` against the current dir, executable dir, or workspace root.
+///
+/// # Arguments
+///
+/// * `resource_path` — Relative path such as `templates/index.html`.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` when the resource exists on disk, else `None`.
 pub fn locate_resource(resource_path: &str) -> Option<PathBuf> {{
     let resource = Path::new(resource_path);
     
@@ -188,7 +216,11 @@ pub fn locate_resource(resource_path: &str) -> Option<PathBuf> {{
     None
 }}
 
-/// Find the workspace root directory
+/// Walks parents from `current_dir` for a `Cargo.toml` containing `[workspace]`.
+///
+/// # Returns
+///
+/// `Some(PathBuf)` to the workspace root, or `None`.
 fn find_workspace_root() -> Option<PathBuf> {{
     let mut current = std::env::current_dir().ok()?;
     
@@ -221,7 +253,15 @@ fn find_workspace_root() -> Option<PathBuf> {{
     }
 }
 
-/// Add the resource module to the main source file if not already present
+/// Ensures `mod resource;` exists in `main.rs` or `lib.rs`.
+///
+/// # Arguments
+///
+/// * `manifest_dir` — Crate root.
+///
+/// # Returns
+///
+/// `()`.
 fn add_resource_module_to_source(manifest_dir: &Path) {
     let src_dir = manifest_dir.join("src");
     
@@ -238,7 +278,15 @@ fn add_resource_module_to_source(manifest_dir: &Path) {
     }
 }
 
-/// Add a module declaration to a file if not already present
+/// Appends `mod resource` / `pub mod resource` to `file_path` when missing.
+///
+/// # Arguments
+///
+/// * `file_path` — `main.rs` or `lib.rs` path.
+///
+/// # Returns
+///
+/// `()`.
 fn add_module_to_file(file_path: &Path) {
     if let Ok(content) = fs::read_to_string(file_path) {
         if !content.contains("mod resource") && !content.contains("pub mod resource") {

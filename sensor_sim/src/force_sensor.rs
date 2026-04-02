@@ -11,6 +11,7 @@ use os_lib::queue::*;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+/// Single tri-axial force sample (simulated units).
 #[derive(Clone, Copy, Debug)]
 pub struct ForceReading {
     pub force_x: f32,
@@ -20,6 +21,7 @@ pub struct ForceReading {
 
 const MAX_QUEUE_SIZE: usize = 128;
 
+/// Simulated force sensor enqueueing [`ForceReading`] at `rate_per_sec`.
 pub struct ForceSensor {
     id: String,
     rate_per_sec: u32,
@@ -34,6 +36,15 @@ pub struct ForceSensor {
 }
 
 impl ForceSensor {
+    /// Spawns the producer thread once; same contract as [`Accelerometer::start_thread`].
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Force sensor with writer available.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn start_thread(&mut self) {
         if self.handle.is_some() {
             return;
@@ -69,6 +80,15 @@ impl ForceSensor {
         }));
     }
 
+    /// Stops the producer thread; same as [`Accelerometer::stop`].
+    ///
+    /// # Arguments
+    ///
+    /// * `self` — Force sensor state.
+    ///
+    /// # Returns
+    ///
+    /// `()`.
     pub fn stop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -81,6 +101,7 @@ impl ForceSensor {
 impl Sensor for ForceSensor {
     type SensorReading = ForceReading;
 
+    /// See [`Sensor::new`].
     fn new(id: String, rate_per_sec: u32) -> Self {
         let mut queue = Box::new(RWRoundQueue::new(MAX_QUEUE_SIZE).unwrap());
         let (reader, writer) = unsafe { queue.as_mut().split() };
@@ -99,26 +120,32 @@ impl Sensor for ForceSensor {
         }
     }
 
+    /// See [`Sensor::start`].
     fn start(&mut self) {
         self.start_thread();
     }
 
+    /// See [`Sensor::read`].
     fn read(&self) -> Option<Self::SensorReading> {
         self.reader.read()
     }
 
+    /// See [`Sensor::available`].
     fn available(&self) -> usize {
         self.reader.len()
     }
 
+    /// See [`Sensor::id`].
     fn id(&self) -> String {
         self.id.clone()
     }
 
+    /// See [`Sensor::stop`].
     fn stop(&mut self) {
         ForceSensor::stop(self);
     }
 
+    /// See [`Sensor::wait_for_data`].
     fn wait_for_data(&self, timeout: Duration) -> bool {
         if self.available() > 0 {
             return true;

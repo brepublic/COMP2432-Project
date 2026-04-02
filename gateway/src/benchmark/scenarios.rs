@@ -1,5 +1,10 @@
 use crate::benchmark::{HttpLoadConfig, ScenarioConfig, SensorScenarioConfig, Thresholds};
 
+/// Built-in benchmark scenarios used when the TOML file lists no `scenarios`.
+///
+/// # Returns
+///
+/// A `Vec` covering baseline, data-loss, HTTP stress, and scalability profiles.
 pub fn default_scenarios() -> Vec<ScenarioConfig> {
     vec![
         ScenarioConfig {

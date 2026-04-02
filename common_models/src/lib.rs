@@ -1,3 +1,5 @@
+//! Shared JSON models exchanged between the gateway, dashboard, and benchmarks.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
